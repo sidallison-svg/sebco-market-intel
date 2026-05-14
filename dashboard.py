@@ -47,6 +47,13 @@ st.set_page_config(
     layout="wide",
 )
 
+# Honor any pending navigation request before the sidebar radio (which owns
+# `nav_page`) is instantiated. Streamlit forbids writing to a widget's key
+# AFTER the widget renders, so callers route via `pending_nav` instead and
+# we apply it here, on the next run.
+if "pending_nav" in st.session_state:
+    st.session_state["nav_page"] = st.session_state.pop("pending_nav")
+
 # ---------------------------------------------------------------------------
 # Corporate styling (navy + grey, serif headings, SEBCO INC wordmark banner)
 # ---------------------------------------------------------------------------
@@ -385,7 +392,9 @@ def _render_search_bar():
     need_rerun = False
 
     if parsed["page"]:
-        st.session_state["nav_page"] = parsed["page"]
+        # Defer the nav-page change; the consumer at the top of the script
+        # writes it into `nav_page` before the sidebar radio renders.
+        st.session_state["pending_nav"] = parsed["page"]
         need_rerun = True
     if parsed["market"]:
         st.session_state["_search_market"] = parsed["market"]
@@ -614,7 +623,7 @@ def page_uploads():
             "first market report."
         )
         if st.button("Go to Upload page"):
-            st.session_state["nav_page"] = "Upload"
+            st.session_state["pending_nav"] = "Upload"
             st.rerun()
         return
 
