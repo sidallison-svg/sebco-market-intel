@@ -193,6 +193,55 @@ def delete_by_source(source: str, db_path: str | None = None) -> int:
 
 
 @_retry
+def get_upload_summaries(db_path: str | None = None) -> list[dict]:
+    """One row per uploaded source PDF, with summary stats.
+
+    Fields per row:
+      source, market, asset_class, quarter, latest_upload, record_count,
+      avg_confidence, parser_strategy, rejected_count.
+
+    Ordered most-recent upload first.
+    """
+    conn = _get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT m.source                  AS source,
+                   MAX(m.market)             AS market,
+                   MAX(m.asset_class)        AS asset_class,
+                   MAX(m.quarter)            AS quarter,
+                   MAX(m.date_ingested)      AS latest_upload,
+                   COUNT(*)                  AS record_count,
+                   AVG(m.confidence)         AS avg_confidence,
+                   MAX(m.parser_strategy)    AS parser_strategy,
+                   (SELECT COUNT(*) FROM rejected_records r
+                    WHERE r.source = m.source) AS rejected_count
+            FROM metrics m
+            GROUP BY m.source
+            ORDER BY MAX(m.date_ingested) DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_retry
+def get_metrics_for_source(source: str, db_path: str | None = None) -> list[dict]:
+    """All metric rows for a single source PDF, ordered for display."""
+    conn = _get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM metrics WHERE source = ? "
+            "ORDER BY submarket, metric_type, metric_period",
+            (source,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_retry
 def get_all_metrics(db_path: str | None = None) -> list[dict]:
     conn = _get_connection(db_path)
     try:

@@ -27,12 +27,15 @@ from database import (
     delete_rejected_record,
     get_all_metrics,
     get_distinct_values,
+    get_metrics_for_source,
     get_rejected_records,
+    get_upload_summaries,
     init_db,
     insert_metrics,
     update_metric,
 )
 from pdf_parser import get_warnings, parse_pdf
+from utils import format_display_name
 
 # ---------------------------------------------------------------------------
 # App config
@@ -42,6 +45,133 @@ st.set_page_config(
     page_title="Sebco Market Intel",
     page_icon="\U0001f4ca",
     layout="wide",
+)
+
+# ---------------------------------------------------------------------------
+# Corporate styling (navy + grey, serif headings, SEBCO INC wordmark banner)
+# ---------------------------------------------------------------------------
+# To swap the placeholder wordmark for a real logo later, replace the
+# .sebco-wordmark <span> below with: st.image("path/to/logo.png", width=160)
+# rendered above the banner block.
+
+st.markdown(
+    """
+    <style>
+      /* Tighten Streamlit's default top padding so the navy banner sits high. */
+      .main .block-container { padding-top: 1.25rem; padding-bottom: 2rem; max-width: 1320px; }
+
+      /* Serif headings across the app */
+      h1, h2, h3, h4 {
+        font-family: "Georgia", "Times New Roman", "Droid Serif", serif !important;
+        color: #0E2A47 !important;
+        letter-spacing: 0.01em;
+      }
+      h1 { font-weight: 600 !important; }
+      h2 { font-weight: 600 !important; border-bottom: 1px solid #E5E7EB; padding-bottom: 0.35rem; }
+      h3 { font-weight: 500 !important; color: #1A1A2E !important; }
+
+      /* SEBCO INC navy banner */
+      .sebco-banner {
+        background: linear-gradient(135deg, #0E2A47 0%, #143560 100%);
+        color: #FFFFFF;
+        padding: 18px 28px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 1px 3px rgba(14, 42, 71, 0.18);
+      }
+      .sebco-wordmark {
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: 1.45rem;
+        font-weight: 600;
+        letter-spacing: 0.18em;
+        color: #FFFFFF;
+        border: 1.5px solid rgba(255, 255, 255, 0.85);
+        padding: 6px 16px;
+        border-radius: 3px;
+      }
+      .sebco-tagline {
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: 1.1rem;
+        font-weight: 300;
+        color: #E5E7EB;
+        letter-spacing: 0.04em;
+      }
+      .sebco-divider {
+        border: 0;
+        border-top: 1px solid #E5E7EB;
+        margin: 0.25rem 0 1.25rem 0;
+      }
+
+      /* Metric cards (Summary page) get a subtle border + light shadow */
+      [data-testid="stMetric"] {
+        background: #FAFBFC;
+        border: 1px solid #E5E7EB;
+        border-left: 3px solid #0E2A47;
+        padding: 0.85rem 1rem;
+        border-radius: 4px;
+        box-shadow: 0 1px 2px rgba(14, 42, 71, 0.04);
+      }
+      [data-testid="stMetricLabel"] {
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: 0.85rem !important;
+        color: #4B5563 !important;
+        font-weight: 500;
+      }
+      [data-testid="stMetricValue"] {
+        font-family: "Georgia", "Times New Roman", serif;
+        color: #0E2A47 !important;
+        font-weight: 600;
+      }
+
+      /* Sidebar polish */
+      [data-testid="stSidebar"] {
+        border-right: 1px solid #E5E7EB;
+      }
+      [data-testid="stSidebar"] .sebco-sidebar-mark {
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: 0.95rem;
+        font-weight: 600;
+        letter-spacing: 0.20em;
+        color: #0E2A47;
+        text-align: center;
+        padding: 14px 8px 6px 8px;
+        border: 1px solid #0E2A47;
+        border-radius: 3px;
+        margin: 0.5rem 0.25rem 0.75rem 0.25rem;
+        background: #FFFFFF;
+      }
+      [data-testid="stSidebar"] .sebco-sidebar-sub {
+        text-align: center;
+        font-family: "Georgia", "Times New Roman", serif;
+        font-size: 0.72rem;
+        color: #6B7280;
+        letter-spacing: 0.10em;
+        margin: -0.5rem 0 0.75rem 0;
+      }
+      .sidebar-meta {
+        font-family: "Georgia", "Times New Roman", serif;
+        color: #6B7280 !important;
+        font-size: 0.78rem;
+      }
+
+      /* Section captions on Summary etc. */
+      .stMarkdown p strong { color: #0E2A47; }
+
+      /* Hide the default Streamlit chrome that looks unfinished */
+      #MainMenu { visibility: hidden; }
+      footer { visibility: hidden; }
+    </style>
+
+    <div class="sebco-banner">
+      <span class="sebco-wordmark">SEBCO&nbsp;&nbsp;INC</span>
+      <span class="sebco-tagline">Market Intelligence</span>
+    </div>
+    <hr class="sebco-divider" />
+    """,
+    unsafe_allow_html=True,
 )
 
 CONFIDENCE_COLORS = {
@@ -173,6 +303,11 @@ PAGE_KEYWORDS = {
     "csv": "Raw Data",
     "edit": "Raw Data",
     "all data": "Raw Data",
+    "library": "Uploads",
+    "uploads": "Uploads",
+    "pdfs": "Uploads",
+    "reports": "Uploads",
+    "files": "Uploads",
 }
 
 
@@ -291,16 +426,31 @@ setup_db()
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 
+st.sidebar.markdown(
+    """
+    <div class="sebco-sidebar-mark">SEBCO&nbsp;&nbsp;INC</div>
+    <div class="sebco-sidebar-sub">MARKET&nbsp;&nbsp;INTELLIGENCE</div>
+    """,
+    unsafe_allow_html=True,
+)
+st.sidebar.markdown("---")
+
 page = st.sidebar.radio(
     "Navigation",
-    ["Upload", "Summary", "Trends", "Comparison", "Raw Data"],
+    ["Upload", "Uploads", "Summary", "Trends", "Comparison", "Raw Data"],
     key="nav_page",
 )
 
 db_path = get_db_path()
 st.sidebar.markdown("---")
-st.sidebar.caption(f"DB: `{os.path.basename(db_path)}`")
-st.sidebar.caption(f"User: `{getpass.getuser()}`")
+st.sidebar.markdown(
+    f"<div class='sidebar-meta'>DB: <code>{os.path.basename(db_path)}</code></div>",
+    unsafe_allow_html=True,
+)
+st.sidebar.markdown(
+    f"<div class='sidebar-meta'>User: <code>{getpass.getuser()}</code></div>",
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------------
 # Smart search bar (rendered at the top of every page)
@@ -413,6 +563,286 @@ def page_upload():
                 else:
                     st.success(f"Saved {inserted} records from {uf.name}")
                 st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Page: Uploads (library of processed PDFs)
+# ---------------------------------------------------------------------------
+
+UPLOAD_SORT_OPTIONS = {
+    "Most recent upload": ("latest_upload", True),
+    "Oldest upload":      ("latest_upload", False),
+    "Market A–Z":         ("market", False),
+    "Most records":       ("record_count", True),
+    "Highest confidence": ("avg_confidence", True),
+}
+
+
+def _format_upload_date(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    try:
+        return datetime.fromisoformat(iso).strftime("%b %d, %Y · %H:%M")
+    except ValueError:
+        return iso[:19]
+
+
+def _year_from_quarter(q: str | None) -> str | None:
+    if not q:
+        return None
+    m = re.search(r"(\d{4})", q)
+    return m.group(1) if m else None
+
+
+def page_uploads():
+    """Library of all processed PDFs.
+
+    Two modes:
+      - List (default): cards with filter / sort / search
+      - Detail: drill-down for a single source, plus delete/reparse controls
+    """
+    selected = st.session_state.get("_upload_detail")
+    if selected:
+        _render_upload_detail(selected)
+        return
+
+    summaries = get_upload_summaries()
+    if not summaries:
+        st.header("Library")
+        st.info(
+            "No PDFs uploaded yet. Go to the **Upload** page to add your "
+            "first market report."
+        )
+        if st.button("Go to Upload page"):
+            st.session_state["nav_page"] = "Upload"
+            st.rerun()
+        return
+
+    # Build a display-name field for each entry up front
+    for s in summaries:
+        s["display_name"] = format_display_name(s["source"])
+        s["year"] = _year_from_quarter(s.get("quarter"))
+
+    st.header("Library")
+    st.caption(
+        f"{len(summaries)} processed report"
+        f"{'s' if len(summaries) != 1 else ''}. "
+        "Click any card to view details, delete, or re-parse."
+    )
+
+    # --- Filter / sort row ---
+    fcol1, fcol2, fcol3, fcol4, fcol5 = st.columns([3, 2, 2, 2, 2.5])
+    with fcol1:
+        search = st.text_input(
+            "Search by name", key="uploads_search",
+            placeholder="e.g., Orange County, Boise…",
+            label_visibility="visible",
+        )
+    with fcol2:
+        markets = ["(all)"] + sorted({s["market"] for s in summaries if s.get("market")})
+        sel_market = st.selectbox("Market", markets, key="uploads_market")
+    with fcol3:
+        asset_classes = ["(all)"] + sorted({
+            (s["asset_class"] or "").title() for s in summaries if s.get("asset_class")
+        })
+        sel_asset = st.selectbox("Asset class", asset_classes, key="uploads_asset")
+    with fcol4:
+        years = ["(all)"] + sorted({s["year"] for s in summaries if s.get("year")}, reverse=True)
+        sel_year = st.selectbox("Year", years, key="uploads_year")
+    with fcol5:
+        sort_label = st.selectbox(
+            "Sort by", list(UPLOAD_SORT_OPTIONS.keys()), key="uploads_sort"
+        )
+
+    # Apply filters
+    filtered = summaries
+    if search:
+        q = search.lower()
+        filtered = [s for s in filtered if q in s["display_name"].lower()]
+    if sel_market != "(all)":
+        filtered = [s for s in filtered if s.get("market") == sel_market]
+    if sel_asset != "(all)":
+        filtered = [s for s in filtered
+                    if (s.get("asset_class") or "").title() == sel_asset]
+    if sel_year != "(all)":
+        filtered = [s for s in filtered if s.get("year") == sel_year]
+
+    # Apply sort
+    sort_key, descending = UPLOAD_SORT_OPTIONS[sort_label]
+    def _sort_value(row):
+        v = row.get(sort_key)
+        if v is None:
+            return ("" if isinstance(sort_key, str) and sort_key == "market" else -1)
+        return v
+    filtered = sorted(filtered, key=_sort_value, reverse=descending)
+
+    if not filtered:
+        st.info("No uploads match these filters.")
+        return
+
+    st.markdown("---")
+    for s in filtered:
+        _render_upload_card(s)
+
+
+def _render_upload_card(s: dict):
+    """One row in the Uploads library."""
+    asset = (s.get("asset_class") or "").title() or "—"
+    market = s.get("market") or "—"
+    quarter = s.get("quarter") or "—"
+    conf = s.get("avg_confidence")
+    conf_str = f"{conf * 100:.0f}% avg confidence" if conf is not None else "no confidence data"
+    date_str = _format_upload_date(s.get("latest_upload"))
+    rejected = s.get("rejected_count") or 0
+    rej_str = f" · {rejected} rejected" if rejected else ""
+
+    with st.container():
+        c1, c2 = st.columns([6, 1])
+        with c1:
+            st.markdown(f"### {s['display_name']}")
+            st.caption(f"{market} · {asset} · {quarter}")
+            st.caption(
+                f"Uploaded {date_str} · {s['record_count']:,} records · "
+                f"{conf_str}{rej_str}"
+            )
+        with c2:
+            st.markdown("&nbsp;", unsafe_allow_html=True)  # vertical alignment
+            if st.button("View details", key=f"vd_{s['source']}"):
+                st.session_state["_upload_detail"] = s["source"]
+                st.rerun()
+    st.markdown("---")
+
+
+def _render_upload_detail(source: str):
+    """Detail view for one source PDF."""
+    if st.button("← Back to library", key="back_to_lib"):
+        st.session_state.pop("_upload_detail", None)
+        st.rerun()
+
+    display_name = format_display_name(source)
+    st.header(display_name)
+    st.caption(
+        f"Original filename: `{source}`"
+    )
+
+    records = get_metrics_for_source(source)
+    if not records:
+        st.warning(
+            "No records found for this source. It may have been deleted."
+        )
+        rej = get_rejected_records(source=source)
+        if rej:
+            st.markdown(f"**{len(rej)} rejected record(s)** still on file:")
+            st.dataframe(pd.DataFrame(rej), use_container_width=True, hide_index=True)
+        return
+
+    df = pd.DataFrame(records)
+
+    # Metadata strip
+    parser_strategies = sorted(df["parser_strategy"].dropna().unique().tolist())
+    upload_dates = sorted(df["date_ingested"].dropna().unique().tolist())
+    if upload_dates:
+        upload_date_str = _format_upload_date(max(upload_dates))
+    else:
+        upload_date_str = "—"
+    high = int((df["confidence"] >= 0.90).sum())
+    med = int(((df["confidence"] >= 0.75) & (df["confidence"] < 0.90)).sum())
+    low = int((df["confidence"] < 0.75).sum())
+
+    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+    mcol1.metric("Total records", f"{len(df):,}")
+    mcol2.metric("Confidence (H/M/L)", f"{high} / {med} / {low}")
+    mcol3.metric("Strategies", ", ".join(parser_strategies) or "—")
+    mcol4.metric("Last ingested", upload_date_str)
+
+    rej = get_rejected_records(source=source)
+    if rej:
+        st.warning(
+            f"{len(rej)} record(s) from this PDF were rejected — see the "
+            "expander below."
+        )
+
+    # Filters
+    st.markdown("---")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        metric_options = sorted(df["metric_type"].dropna().unique().tolist())
+        sel_metrics = st.multiselect(
+            "Metric type", metric_options, default=[], key=f"det_mt_{source}"
+        )
+    with f2:
+        submarket_options = sorted(df["submarket"].dropna().unique().tolist())
+        sel_subs = st.multiselect(
+            "Submarket", submarket_options, default=[], key=f"det_sub_{source}"
+        )
+    with f3:
+        period_options = sorted(df["period_type"].dropna().unique().tolist())
+        sel_periods = st.multiselect(
+            "Period type", period_options, default=[], key=f"det_pt_{source}"
+        )
+
+    view = df.copy()
+    if sel_metrics:
+        view = view[view["metric_type"].isin(sel_metrics)]
+    if sel_subs:
+        view = view[view["submarket"].isin(sel_subs)]
+    if sel_periods:
+        view = view[view["period_type"].isin(sel_periods)]
+
+    st.markdown(f"**{len(view):,} of {len(df):,} records shown**")
+    show_cols = [
+        "submarket", "metric_type", "metric_period", "period_type",
+        "metric_value", "unit", "confidence",
+    ]
+    existing = [c for c in show_cols if c in view.columns]
+    st.dataframe(
+        view[existing].fillna({"submarket": "(market-wide)"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("Show raw text (first 200 chars per record)"):
+        if not view.empty:
+            raw_df = view[["submarket", "metric_type", "raw_text"]].copy()
+            raw_df["raw_text"] = raw_df["raw_text"].fillna("").str.slice(0, 200)
+            st.dataframe(raw_df, use_container_width=True, hide_index=True)
+
+    if rej:
+        with st.expander(f"Show {len(rej)} rejected record(s) from this PDF"):
+            st.dataframe(pd.DataFrame(rej), use_container_width=True, hide_index=True)
+
+    # --- Actions ---
+    st.markdown("---")
+    a1, a2, a3 = st.columns([1, 1, 3])
+    with a1:
+        confirm_key = f"confirm_del_{source}"
+        if st.session_state.get(confirm_key):
+            if st.button("Confirm delete", type="primary", key=f"del_yes_{source}"):
+                n = delete_by_source(source)
+                st.session_state.pop(confirm_key, None)
+                st.session_state.pop("_upload_detail", None)
+                st.success(f"Deleted {n} records from {display_name}")
+                st.rerun()
+        else:
+            if st.button("Delete this upload", key=f"del_ask_{source}"):
+                st.session_state[confirm_key] = True
+                st.rerun()
+    with a2:
+        st.button(
+            "Re-parse (coming soon)",
+            disabled=True,
+            help=(
+                "Will re-run the parser against the saved PDF if it's "
+                "still in the uploads folder. Not yet implemented."
+            ),
+            key=f"reparse_{source}",
+        )
+    with a3:
+        if st.session_state.get(f"confirm_del_{source}"):
+            st.caption(
+                "Click **Confirm delete** to permanently remove this "
+                "upload's records, or **← Back to library** to cancel."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +1211,7 @@ def page_raw_data():
         return
 
     df = pd.DataFrame(rows)
+    df["display_name"] = df["source"].apply(format_display_name)
 
     search = _consume_search_filters()
 
@@ -800,8 +1231,13 @@ def page_raw_data():
                                   help=FILTER_HELP["period_type"])
     with col3:
         sources = ["(all)"] + sorted(df["source"].unique().tolist())
-        sel_source = st.selectbox("Source", sources, key="raw_source",
-                                  help=FILTER_HELP["source"])
+        sel_source = st.selectbox(
+            "Source",
+            sources,
+            key="raw_source",
+            help=FILTER_HELP["source"],
+            format_func=lambda s: s if s == "(all)" else format_display_name(s),
+        )
     with col4:
         search_text = st.text_input("Search", key="raw_search",
                                     help="Filter rows by text match across all columns.")
@@ -821,21 +1257,36 @@ def page_raw_data():
 
     st.markdown(f"**{len(filtered)} records**")
 
-    # Display columns (confidence kept on Raw Data page)
+    # Display columns: pretty display_name first, raw source kept as reference
     display_cols = [
-        "id", "source", "quarter", "market", "submarket", "metric_type",
-        "metric_value", "unit", "metric_period", "period_type", "confidence",
-        "parser_strategy", "last_edited_by", "last_edited_at",
+        "id", "display_name", "source", "quarter", "market", "submarket",
+        "metric_type", "metric_value", "unit", "metric_period", "period_type",
+        "confidence", "parser_strategy", "last_edited_by", "last_edited_at",
     ]
     existing_cols = [c for c in display_cols if c in filtered.columns]
     st.dataframe(
         filtered[existing_cols],
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "display_name": st.column_config.TextColumn(
+                "Report", help="Pretty display name derived from filename"
+            ),
+            "source": st.column_config.TextColumn(
+                "Source file", help="Original PDF filename"
+            ),
+        },
     )
 
-    # CSV export
-    csv = filtered.to_csv(index=False)
+    # CSV export — keep raw `source` AND include `display_name` for spreadsheets
+    export_df = filtered.copy()
+    if "display_name" in export_df.columns and "source" in export_df.columns:
+        cols = list(export_df.columns)
+        cols.remove("display_name")
+        src_idx = cols.index("source")
+        cols.insert(src_idx + 1, "display_name")
+        export_df = export_df[cols]
+    csv = export_df.to_csv(index=False)
     st.download_button(
         "Export CSV",
         csv,
@@ -869,10 +1320,15 @@ def page_raw_data():
     st.subheader("Delete Source")
     sources_list = get_distinct_values("source")
     if sources_list:
-        del_source = st.selectbox("Source to delete", sources_list, key="del_source")
+        del_source = st.selectbox(
+            "Source to delete",
+            sources_list,
+            key="del_source",
+            format_func=format_display_name,
+        )
         if st.button("Delete all records from this source", type="secondary"):
             n = delete_by_source(del_source)
-            st.success(f"Deleted {n} records from {del_source}")
+            st.success(f"Deleted {n} records from {format_display_name(del_source)}")
             st.rerun()
 
     # Rejected records
@@ -884,20 +1340,29 @@ def page_raw_data():
                    "(market, asset_class, metric_type, etc.) would appear here.")
     else:
         rej_df = pd.DataFrame(rejected)
+        rej_df["display_name"] = rej_df["source"].apply(format_display_name)
         st.caption(
             f"{len(rej_df)} record(s) were skipped because required fields "
             "were missing. Fix the source PDF and re-import, or delete the "
             "rejection after manually adding the record."
         )
         show_rej_cols = [
-            "id", "source", "source_page", "reason", "missing_fields",
-            "raw_text", "parser_strategy", "date_rejected",
+            "id", "display_name", "source", "source_page", "reason",
+            "missing_fields", "raw_text", "parser_strategy", "date_rejected",
         ]
         existing_rej_cols = [c for c in show_rej_cols if c in rej_df.columns]
         st.dataframe(
             rej_df[existing_rej_cols],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "display_name": st.column_config.TextColumn(
+                    "Report", help="Pretty display name derived from filename"
+                ),
+                "source": st.column_config.TextColumn(
+                    "Source file", help="Original PDF filename"
+                ),
+            },
         )
         col1, col2 = st.columns([1, 3])
         with col1:
@@ -922,6 +1387,8 @@ if page == "Upload":
     page_upload()
 elif page == "Summary":
     page_summary()
+elif page == "Uploads":
+    page_uploads()
 elif page == "Trends":
     page_trends()
 elif page == "Comparison":
