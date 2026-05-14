@@ -3,6 +3,7 @@ SQLite database layer with retry logic for OneDrive-shared access.
 """
 
 import getpass
+import json
 import sqlite3
 import time
 from datetime import datetime
@@ -38,7 +39,26 @@ CREATE INDEX IF NOT EXISTS idx_submarket ON metrics(submarket);
 CREATE INDEX IF NOT EXISTS idx_metric_type ON metrics(metric_type);
 CREATE INDEX IF NOT EXISTS idx_metric_period ON metrics(metric_period);
 CREATE INDEX IF NOT EXISTS idx_source ON metrics(source);
+
+CREATE TABLE IF NOT EXISTS rejected_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source          TEXT,
+    source_page     INTEGER,
+    reason          TEXT NOT NULL,
+    missing_fields  TEXT,
+    raw_text        TEXT,
+    record_json     TEXT,
+    parser_strategy TEXT,
+    date_rejected   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejected_source ON rejected_records(source);
 """
+
+REQUIRED_FIELDS = (
+    "source", "report_date", "quarter", "metric_period",
+    "period_type", "market", "asset_class", "metric_type", "unit",
+)
 
 MAX_RETRIES = 5
 RETRY_DELAY = 0.5  # seconds
@@ -75,15 +95,50 @@ def init_db(db_path: str | None = None):
     conn.close()
 
 
+def _validate_record(r: dict) -> list[str]:
+    """Return list of required field names that are missing/empty."""
+    return [f for f in REQUIRED_FIELDS if not r.get(f)]
+
+
 @_retry
-def insert_metrics(records: list[dict], db_path: str | None = None) -> int:
-    """Insert parsed metric records. Returns number of rows inserted."""
+def insert_metrics(records: list[dict], db_path: str | None = None) -> dict:
+    """Insert parsed metric records.
+
+    Records missing required fields are logged to rejected_records and skipped
+    rather than aborting the whole batch.
+
+    Returns:
+        {"inserted": int, "rejected": int, "rejected_ids": [int, ...]}
+    """
     conn = _get_connection(db_path)
     now = datetime.now().isoformat()
     user = getpass.getuser()
-    count = 0
+    inserted = 0
+    rejected_ids: list[int] = []
     try:
         for r in records:
+            missing = _validate_record(r)
+            if missing:
+                cur = conn.execute(
+                    """INSERT INTO rejected_records
+                       (source, source_page, reason, missing_fields,
+                        raw_text, record_json, parser_strategy, date_rejected)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (
+                        r.get("source"),
+                        r.get("source_page"),
+                        f"Missing required field(s): {', '.join(missing)}",
+                        ",".join(missing),
+                        (r.get("raw_text") or "")[:500],
+                        json.dumps({k: v for k, v in r.items() if k != "raw_text"},
+                                   default=str)[:2000],
+                        r.get("parser_strategy"),
+                        now,
+                    ),
+                )
+                rejected_ids.append(cur.lastrowid)
+                continue
+
             conn.execute(
                 """INSERT INTO metrics
                    (source, source_page, report_date, quarter, metric_period,
@@ -101,11 +156,15 @@ def insert_metrics(records: list[dict], db_path: str | None = None) -> int:
                     now, user, now,
                 ),
             )
-            count += 1
+            inserted += 1
         conn.commit()
     finally:
         conn.close()
-    return count
+    return {
+        "inserted": inserted,
+        "rejected": len(rejected_ids),
+        "rejected_ids": rejected_ids,
+    }
 
 
 @_retry
@@ -125,6 +184,8 @@ def delete_by_source(source: str, db_path: str | None = None) -> int:
     conn = _get_connection(db_path)
     try:
         cur = conn.execute("DELETE FROM metrics WHERE source = ?", (source,))
+        # Also clear any prior rejections from this source so re-import is clean.
+        conn.execute("DELETE FROM rejected_records WHERE source = ?", (source,))
         conn.commit()
         return cur.rowcount
     finally:
@@ -164,5 +225,39 @@ def get_distinct_values(column: str, db_path: str | None = None) -> list[str]:
             f"SELECT DISTINCT {column} FROM metrics WHERE {column} IS NOT NULL ORDER BY {column}"
         ).fetchall()
         return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
+@_retry
+def get_rejected_records(source: str | None = None,
+                         db_path: str | None = None) -> list[dict]:
+    """Return rejected records, optionally filtered by source PDF."""
+    conn = _get_connection(db_path)
+    try:
+        if source:
+            rows = conn.execute(
+                "SELECT * FROM rejected_records WHERE source = ? "
+                "ORDER BY date_rejected DESC",
+                (source,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM rejected_records ORDER BY date_rejected DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_retry
+def delete_rejected_record(rejected_id: int, db_path: str | None = None) -> int:
+    conn = _get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM rejected_records WHERE id = ?", (rejected_id,)
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()

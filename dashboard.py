@@ -24,13 +24,15 @@ from config import get_db_path
 from database import (
     check_source_exists,
     delete_by_source,
+    delete_rejected_record,
     get_all_metrics,
     get_distinct_values,
+    get_rejected_records,
     init_db,
     insert_metrics,
     update_metric,
 )
-from pdf_parser import parse_pdf
+from pdf_parser import get_warnings, parse_pdf
 
 # ---------------------------------------------------------------------------
 # App config
@@ -348,11 +350,15 @@ def page_upload():
             try:
                 with st.spinner("Parsing PDF..."):
                     records = parse_pdf(tmp_path)
+                    parser_warnings = get_warnings()
                     # Override source with original filename
                     for r in records:
                         r["source"] = uf.name
             finally:
                 os.unlink(tmp_path)
+
+            for w in parser_warnings:
+                st.warning(w)
 
             if not records:
                 st.error(
@@ -395,8 +401,17 @@ def page_upload():
 
             # Save button
             if st.button(f"Save to database", key=f"save_{uf.name}"):
-                n = insert_metrics(records)
-                st.success(f"Saved {n} records from {uf.name}")
+                result = insert_metrics(records)
+                inserted = result["inserted"]
+                rejected = result["rejected"]
+                if rejected:
+                    st.warning(
+                        f"Saved {inserted} records from {uf.name}, "
+                        f"{rejected} rejected — view details on the Raw Data "
+                        f"page under “Rejected Records”."
+                    )
+                else:
+                    st.success(f"Saved {inserted} records from {uf.name}")
                 st.rerun()
 
 
@@ -859,6 +874,44 @@ def page_raw_data():
             n = delete_by_source(del_source)
             st.success(f"Deleted {n} records from {del_source}")
             st.rerun()
+
+    # Rejected records
+    st.markdown("---")
+    st.subheader("Rejected Records")
+    rejected = get_rejected_records()
+    if not rejected:
+        st.caption("No rejected records. Records with missing required fields "
+                   "(market, asset_class, metric_type, etc.) would appear here.")
+    else:
+        rej_df = pd.DataFrame(rejected)
+        st.caption(
+            f"{len(rej_df)} record(s) were skipped because required fields "
+            "were missing. Fix the source PDF and re-import, or delete the "
+            "rejection after manually adding the record."
+        )
+        show_rej_cols = [
+            "id", "source", "source_page", "reason", "missing_fields",
+            "raw_text", "parser_strategy", "date_rejected",
+        ]
+        existing_rej_cols = [c for c in show_rej_cols if c in rej_df.columns]
+        st.dataframe(
+            rej_df[existing_rej_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            rej_id = st.number_input(
+                "Rejected record ID", min_value=1, step=1, key="rej_id"
+            )
+        with col2:
+            if st.button("Delete rejected record"):
+                n = delete_rejected_record(int(rej_id))
+                if n:
+                    st.success(f"Deleted rejected record {int(rej_id)}")
+                    st.rerun()
+                else:
+                    st.error(f"No rejected record with ID {int(rej_id)}")
 
 
 # ---------------------------------------------------------------------------

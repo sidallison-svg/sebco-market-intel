@@ -1,16 +1,29 @@
 """
 PDF parser for Kidder Mathews quarterly market reports.
 
-Two strategies:
-  - Structured: reports with MARKET BREAKDOWN / MARKET SUMMARY tables (Boise, Inland Empire)
-  - Narrative: reports with data in sidebar callouts and prose (Seattle)
+Strategies:
+  - Structured: MARKET BREAKDOWN / MARKET SUMMARY tables (Boise, Inland Empire, East Bay, Orange County)
+  - Dual structured: side-by-side INDUSTRIAL/WAREHOUSE breakdowns (Silicon Valley)
+  - Submarket statistics: full submarket grid on pages 2-3 (East Bay, Orange County, Silicon Valley)
+  - Narrative: data in sidebar callouts and prose (Seattle)
 """
 
+import logging
 import os
 import re
 from datetime import date as date_type
 
 import pdfplumber
+
+logger = logging.getLogger(__name__)
+
+PARSER_WARNINGS: list[str] = []  # populated per-call, callers may inspect
+
+
+def _warn(msg: str):
+    """Record a parser warning so the dashboard can surface it."""
+    PARSER_WARNINGS.append(msg)
+    logger.warning(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -111,37 +124,100 @@ METRIC_MAP = {
     "direct vacancy rate": "vacancy_rate",
     "vacancy rate": "vacancy_rate",
     "asking lease rate": "asking_rent",
+    "asking lease rate/sf/mo": "asking_rent",
     "asking lease rate (nnn)": "asking_rent",
     "average asking rents/sf/mo": "asking_rent",
     "avg asking rents/sf/mo": "asking_rent",
+    "average direct rental rate": "asking_rent",
+    "direct rental rate": "asking_rent",
+    "rental rate": "asking_rent",
+    "average rental rate": "asking_rent",
+    "average direct rental rate (nnn)": "asking_rent",
+    "average rental rate (nnn)": "asking_rent",
     "cap rates": "cap_rate",
     "cap rate": "cap_rate",
     "under construction (sf)": "under_construction",
     "under construction": "under_construction",
     "under const. (sf)": "under_construction",
+    "sf under construction": "under_construction",
     "deliveries (sf)": "deliveries",
     "deliveries": "deliveries",
+    "new deliveries": "deliveries",
+    "new deliveries (sf)": "deliveries",
+    "construction deliveries": "construction_deliveries",
+    "construction deliveries (sf)": "construction_deliveries",
     "direct net absorption (sf)": "net_absorption",
     "direct net absorption": "net_absorption",
     "net absorption (sf)": "net_absorption",
     "net absorption": "net_absorption",
+    "1q26 direct net absorption": "net_absorption",
+    "2q26 direct net absorption": "net_absorption",
+    "3q26 direct net absorption": "net_absorption",
+    "4q26 direct net absorption": "net_absorption",
+    "ytd direct net absorption": "ytd_net_absorption",
+    "2025 direct net absorption": "ytd_net_absorption",
+    "2026 direct net absorption": "ytd_net_absorption",
+    "1q26 direct net": "net_absorption",
+    "1q26 leasing activity": "leasing_activity",
+    "1q26 total leasing activity": "leasing_activity",
+    "ytd total leasing activity": "ytd_leasing_activity",
+    "2025 total leasing activity": "ytd_leasing_activity",
+    "2026 total leasing activity": "ytd_leasing_activity",
+    "2025 leasing activity": "ytd_leasing_activity",
+    "1q26 gross absorption": "gross_absorption",
+    "2025 gross absorption": "ytd_gross_absorption",
+    "2026 gross absorption": "ytd_gross_absorption",
+    "ytd gross absorption": "ytd_gross_absorption",
+    "gross absorption": "gross_absorption",
     "total inventory": "total_inventory",
     "new construction (sf)": "new_construction",
     "new construction": "new_construction",
     "average sales price/sf": "avg_sales_price",
     "avg sales price/sf": "avg_sales_price",
+    "availability rate": "availability_rate",
+    "total available rate": "availability_rate",
+    "total availability rate": "availability_rate",
+    "sublet vacancy rate": "sublet_vacancy_rate",
+    "sublease vacancy rate": "sublet_vacancy_rate",
+    "total vacancy rate": "total_vacancy_rate",
+    "leased activity (sf)": "leasing_activity",
+    "leased activity": "leasing_activity",
+    "leasing activity (sf)": "leasing_activity",
+    "leasing activity": "leasing_activity",
+    "leased sf": "leasing_activity",
+    "lease transactions (sf)": "leasing_activity",
+    "lease transactions": "leasing_activity",
+    "direct leasing activity": "leasing_activity",
+    "ytd leasing activity": "ytd_leasing_activity",
+    "2025 leasing activity": "ytd_leasing_activity",
+    "2026 leasing activity": "ytd_leasing_activity",
+    "sales volume (sf)": "sales_volume",
+    "sales volume": "sales_volume",
+    "sold sf": "sales_volume",
+    "sale transactions (sf)": "sales_volume",
+    "sale transactions": "sales_volume",
 }
 
 UNIT_OVERRIDES = {
     "vacancy_rate": "percent",
+    "availability_rate": "percent",
+    "sublet_vacancy_rate": "percent",
+    "total_vacancy_rate": "percent",
     "cap_rate": "percent",
     "asking_rent": "dollar_per_sf",
     "avg_sales_price": "dollar_per_sf",
     "net_absorption": "sf",
+    "ytd_net_absorption": "sf",
+    "gross_absorption": "sf",
+    "ytd_gross_absorption": "sf",
     "under_construction": "sf",
     "deliveries": "sf",
+    "construction_deliveries": "sf",
     "new_construction": "sf",
     "total_inventory": "sf",
+    "leasing_activity": "sf",
+    "ytd_leasing_activity": "sf",
+    "sales_volume": "sf",
 }
 
 
@@ -159,35 +235,152 @@ def _normalize_metric(raw_label: str) -> str | None:
 # Header parsing
 # ---------------------------------------------------------------------------
 
-KNOWN_MARKETS = [
-    "Inland Empire",  # Must be before shorter names
-    "Seattle", "Boise", "Portland", "San Francisco",
-    "Los Angeles", "Phoenix", "Reno", "Tucson", "Sacramento", "San Diego",
-    "East Bay", "Silicon Valley", "Bellevue",
-]
+KNOWN_ASSET_CLASSES = ["industrial", "office", "retail", "multifamily", "warehouse"]
 
-KNOWN_ASSET_CLASSES = ["industrial", "office", "retail", "multifamily"]
+# Lines that should be ignored when capturing the market name block.
+_HEADER_NOISE = re.compile(
+    r"^(VACANCY|ABSORPTION|RENTAL\s*RATES?|CONSTRUCTION|DELIVERIES|"
+    r"YEAR-OVER-YEAR|MARKET\s*DRIVERS?|ECONOMIC\s*(OVERVIEW|REVIEW)|"
+    r"NEAR-TERM\s*OUTLOOK|SIGNIFICANT)",
+    re.IGNORECASE,
+)
 
 
-def _detect_header(page1_text: str) -> dict:
-    """Extract quarter, market, and asset class from report header."""
-    info = {"quarter": None, "market": None, "asset_class": None}
-    header_block = page1_text[:500]
+def _title_case_market(raw: str) -> str:
+    """Convert 'EAST BAY' / 'east bay' to 'East Bay' (preserving slashes)."""
+    parts = re.split(r"(\s+|/)", raw.strip())
+    return "".join(p if p.isspace() or p == "/" else p.capitalize() for p in parts)
+
+
+def _market_from_filename(filepath: str) -> tuple[str | None, str | None]:
+    """Extract (market, asset_class) from KM filename convention.
+
+    Pattern: {asset}-market-research-{market-slug}-{year}-{quarter}.pdf
+    Returns (None, None) if pattern doesn't match.
+    """
+    name = os.path.basename(filepath)
+    m = re.match(
+        r"^([a-z]+)-market-research-([a-z][a-z-]*?)-(\d{4})-(\dq)\.pdf$",
+        name,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None, None
+    asset = m.group(1).lower()
+    market_slug = m.group(2).replace("-", " ")
+    return _title_case_market(market_slug), asset
+
+
+def _detect_market_from_trends(page1_text: str) -> str | None:
+    """Find 'MARKET TRENDS' and capture the market name from following lines.
+
+    Handles three observed layouts:
+      Layout A: 'MARKET TRENDS' on its own line, market name on the next 1-2 lines
+                (East Bay, Orange County, Silicon Valley)
+      Layout B: 'MARKET TRENDS | SEATTLE' single line (Seattle)
+      Layout C: 'MARKET TRENDS' then 'BOISE INDUSTRIAL' on one line (Boise)
+    """
+    lines = page1_text.split("\n")
+
+    for idx, line in enumerate(lines):
+        if "MARKET TRENDS" not in line.upper():
+            continue
+
+        # Layout B: pipe-delimited on same line
+        if "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            for p in parts:
+                if "MARKET TRENDS" in p.upper():
+                    continue
+                if p:
+                    return _title_case_market(_strip_asset(p))
+
+        # Layouts A/C: market name is in the next 1-3 non-noise lines
+        collected: list[str] = []
+        for j in range(idx + 1, min(idx + 5, len(lines))):
+            candidate = lines[j].strip()
+            if not candidate:
+                if collected:
+                    break
+                continue
+            if _HEADER_NOISE.match(candidate):
+                break
+            # Stop on first line that doesn't look like ALL CAPS (header is typically caps)
+            if not _looks_like_header_line(candidate):
+                break
+            collected.append(candidate)
+            if len(collected) >= 3:
+                break
+
+        if not collected:
+            continue
+
+        joined = " ".join(collected)
+        return _title_case_market(_strip_asset(joined))
+
+    return None
+
+
+def _looks_like_header_line(text: str) -> bool:
+    """Header lines for the market title block are short, mostly uppercase, no digits."""
+    if len(text) > 60:
+        return False
+    if re.search(r"\d", text):
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    upper_frac = sum(1 for c in letters if c.isupper()) / len(letters)
+    return upper_frac >= 0.7
+
+
+def _strip_asset(text: str) -> str:
+    """Remove an asset class word from the title block (e.g. 'BOISE INDUSTRIAL' -> 'BOISE')."""
+    for ac in KNOWN_ASSET_CLASSES:
+        text = re.sub(rf"\b{ac}\b", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _detect_header(page1_text: str, filepath: str | None = None) -> dict:
+    """Extract quarter, market, and asset class from report header.
+
+    Strategy:
+      1. Find 'MARKET TRENDS' and capture market name from following lines.
+      2. Detect asset class from the same header region.
+      3. Fall back to filename pattern if market or asset class still missing.
+    """
+    info: dict = {"quarter": None, "market": None, "asset_class": None}
+    header_block = page1_text[:800]
 
     m = re.search(r"(\dQ)\s*(\d{4})", header_block)
     if m:
         info["quarter"] = f"{m.group(1)} {m.group(2)}"
 
-    upper = header_block.upper()
-    for name in KNOWN_MARKETS:
-        if name.upper() in upper:
-            info["market"] = name
-            break
+    market = _detect_market_from_trends(page1_text)
+    if market:
+        info["market"] = market
 
+    upper = header_block.upper()
     for ac in KNOWN_ASSET_CLASSES:
         if ac.upper() in upper:
             info["asset_class"] = ac
             break
+
+    # Filename fallback
+    if filepath and (not info["market"] or not info["asset_class"]):
+        fn_market, fn_asset = _market_from_filename(filepath)
+        if not info["market"] and fn_market:
+            info["market"] = fn_market
+            _warn(
+                f"Market not found in PDF header for {os.path.basename(filepath)}, "
+                f"using filename fallback: '{fn_market}' — verify on Raw Data page."
+            )
+        if not info["asset_class"] and fn_asset:
+            info["asset_class"] = fn_asset
+            _warn(
+                f"Asset class not found in PDF header for {os.path.basename(filepath)}, "
+                f"using filename fallback: '{fn_asset}'."
+            )
 
     return info
 
@@ -233,12 +426,13 @@ def _extract_column_headers(text: str) -> list[str] | None:
 
 
 # Token pattern: matches values like $1.01, 8.0%, -81.4%, 35.7M, 60906882, -99969, 0, N/A
+# Note: N/A is bounded by \b so it doesn't match inside words like "Buena", "Santa", "Dana".
 _VAL_TOKEN = re.compile(
-    r"-?\$\d[\d,.]+"      # dollar (must start with digit after $)
-    r"|-?\d[\d,.]*[MKB]"  # number with suffix
-    r"|-?\d[\d,.]*%"      # percentage
-    r"|-?\d[\d,.]*"       # plain number including single digits like 0
-    r"|N/?A",             # N/A
+    r"-?\$\d[\d,.]+"       # dollar (must start with digit after $)
+    r"|-?\d[\d,.]*[MKB]"   # number with suffix
+    r"|-?\d[\d,.]*%"       # percentage
+    r"|-?\d[\d,.]*"        # plain number including single digits like 0
+    r"|\bN/?A\b",          # N/A — word-bounded to avoid 'Ana','Dana','Buena','Laguna'
     re.IGNORECASE
 )
 
@@ -739,14 +933,335 @@ def _parse_narrative_submarkets(full_text: str, header: dict, source: str,
 
 
 # ---------------------------------------------------------------------------
+# Strategy 3: SUBMARKET STATISTICS table parser
+# ---------------------------------------------------------------------------
+
+def _group_rows(words: list[dict], y_tol: float = 3.0) -> list[list[dict]]:
+    """Group pdfplumber words into rows by y-coordinate."""
+    rows: list[list[dict]] = []
+    cur: list[dict] = []
+    last_top: float | None = None
+    for w in sorted(words, key=lambda x: (x["top"], x["x0"])):
+        if last_top is None or abs(w["top"] - last_top) > y_tol:
+            if cur:
+                rows.append(cur)
+            cur = [w]
+            last_top = w["top"]
+        else:
+            cur.append(w)
+            last_top = (last_top + w["top"]) / 2
+    if cur:
+        rows.append(cur)
+    for r in rows:
+        r.sort(key=lambda w: w["x0"])
+    return rows
+
+
+def _build_columns(header_rows: list[list[dict]],
+                   data_row: list[dict] | None = None) -> list[dict]:
+    """Cluster header-row words into column groups, anchored to data-row positions.
+
+    Strategy: data values are left-aligned at consistent x0 positions across
+    rows. Use the first data row's x0 positions as canonical column anchors,
+    then assign each header word to the column whose anchor is the largest
+    one <= word.x0 + slack. This correctly merges multi-word labels like
+    'Direct Net Absorption' where 'Net' is indented within the column.
+
+    If no data_row is given, fall back to header-only x0 clustering.
+
+    Returns list of {"x_min", "x_max", "x_center", "label"} sorted left-to-right.
+    """
+    all_words = [dict(w) for row in header_rows for w in row]
+    if not all_words:
+        return []
+    for w in all_words:
+        w["x_center"] = (w["x0"] + w["x1"]) / 2
+
+    # Anchor x0 positions — preferred source is the data row, filtered to
+    # only value-shaped tokens (so submarket names with internal spaces and
+    # mid-row unit labels like "SF" don't create spurious columns).
+    anchor_source: list[dict]
+    if data_row:
+        value_words = [w for w in data_row if _VAL_TOKEN.fullmatch(w["text"])]
+        # Always include the leftmost word as the submarket-name anchor.
+        leftmost = min(data_row, key=lambda w: w["x0"]) if data_row else None
+        if leftmost is not None and leftmost not in value_words:
+            anchor_source = [leftmost] + value_words
+        else:
+            anchor_source = value_words or data_row
+    else:
+        anchor_source = all_words
+
+    x0_tol = 3.0
+    x0_anchors: list[float] = []
+    for x0 in sorted(w["x0"] for w in anchor_source):
+        if not x0_anchors or x0 - x0_anchors[-1] > x0_tol:
+            x0_anchors.append(x0)
+        else:
+            x0_anchors[-1] = (x0_anchors[-1] + x0) / 2
+
+    if len(x0_anchors) <= 1:
+        return []
+
+    assignments: dict[int, list[dict]] = {i: [] for i in range(len(x0_anchors))}
+    for w in all_words:
+        col_idx = 0
+        for i, a in enumerate(x0_anchors):
+            if a <= w["x0"] + 1:
+                col_idx = i
+            else:
+                break
+        assignments[col_idx].append(w)
+
+    columns = []
+    for i, cluster in assignments.items():
+        anchor_x0 = x0_anchors[i]
+        if not cluster:
+            # Still emit an empty column so positional value mapping aligns
+            # with the data-row anchors.
+            columns.append({
+                "x_center": anchor_x0,
+                "x_min": anchor_x0,
+                "x_max": anchor_x0,
+                "label": "",
+            })
+            continue
+        cluster.sort(key=lambda w: (w["top"], w["x0"]))
+        label = " ".join(w["text"] for w in cluster)
+        label = re.sub(r"\([^)]*\)", "", label)  # drop "(SF)", "(NNN)"
+        label = re.sub(r"\s+", " ", label).strip()
+        columns.append({
+            "x_center": sum(w["x_center"] for w in cluster) / len(cluster),
+            "x_min": min(w["x0"] for w in cluster),
+            "x_max": max(w["x1"] for w in cluster),
+            "label": label,
+        })
+    columns.sort(key=lambda c: c["x_min"])
+    return columns
+
+
+def _parse_submarket_statistics(page, header: dict, source: str,
+                                page_num: int) -> list[dict]:
+    """Parse a SUBMARKET STATISTICS table on a single page using word positions.
+
+    Handles single-asset tables (East Bay, Orange County) and the dual
+    industrial/warehouse layout on Silicon Valley page 3.
+    """
+    text = page.extract_text() or ""
+    if "SUBMARKET STATISTICS" not in text.upper():
+        return []
+
+    words = page.extract_words(x_tolerance=2, y_tolerance=3)
+    rows = _group_rows(words)
+
+    stats_idx = None
+    for i, row in enumerate(rows):
+        if "SUBMARKET STATISTICS" in " ".join(w["text"] for w in row).upper():
+            stats_idx = i
+            break
+    if stats_idx is None:
+        return []
+
+    # A data row has at least one true value: percent, dollar, or number with
+    # comma/decimal. Bare integers like '0' or quarter labels like '1Q26' don't
+    # qualify (those appear in header rows).
+    data_signal = re.compile(r"%|\$\d|[\d.],[\d.]|\d+\.\d")
+
+    header_rows: list[list[dict]] = []
+    data_start: int | None = None
+    for i in range(stats_idx + 1, len(rows)):
+        row = rows[i]
+        line = " ".join(w["text"] for w in row)
+        if data_signal.search(line):
+            data_start = i
+            break
+        header_rows.append(row)
+        if len(header_rows) >= 5:
+            break
+
+    if not header_rows or data_start is None:
+        return []
+
+    columns = _build_columns(header_rows, data_row=rows[data_start])
+    if len(columns) < 2:
+        return []
+
+    # The leftmost column is the submarket-name column; the rest are metrics.
+    metric_cols = columns[1:]
+    metric_specs = [(_normalize_metric(c["label"]), c["label"]) for c in metric_cols]
+
+    market = header.get("market")
+    asset_class = header.get("asset_class") or "industrial"
+    report_quarter = header["quarter"]
+    report_date = quarter_to_date(report_quarter)
+
+    market_pat = re.escape(market or "") if market else ""
+    total_pat = re.compile(
+        rf"^{market_pat}\s+(Industrial\s+Totals?|Warehouse\s+Totals?|Totals?)\b"
+        if market_pat else r"^\b$",
+        re.IGNORECASE,
+    )
+
+    records = []
+    current_asset = asset_class
+
+    # Stop markers: anything that signals end of the statistics block.
+    stop_pat = re.compile(
+        r"(BIGGEST\s+(SALE|LEASE)|NEAR-TERM\s+OUTLOOK|DATA\s+SOURCE|"
+        r"COMMERCIAL\s+BROKERAGE|KIDDER\s+MATHEWS\s+IS)",
+        re.IGNORECASE,
+    )
+
+    for i in range(data_start, len(rows)):
+        row = rows[i]
+        line = " ".join(w["text"] for w in row).strip()
+        if not line:
+            continue
+        if stop_pat.search(line):
+            break
+
+        tokens = list(_VAL_TOKEN.finditer(line))
+        if len(tokens) < 2:
+            continue
+
+        first_val_start = tokens[0].start()
+        sub_name = line[:first_val_start].strip()
+        if not sub_name:
+            continue
+
+        is_total = bool(total_pat.search(sub_name)) if market_pat else False
+        # Silicon Valley: the "Industrial Total" row ends the industrial block.
+        is_industrial_total = bool(
+            market_pat and re.search(
+                rf"^{market_pat}\s+Industrial\s+Total", sub_name, re.IGNORECASE
+            )
+        )
+        is_warehouse_total = bool(
+            market_pat and re.search(
+                rf"^{market_pat}\s+Warehouse\s+Total", sub_name, re.IGNORECASE
+            )
+        )
+
+        submarket = None if is_total else sub_name
+
+        n = min(len(tokens), len(metric_specs))
+        for j in range(n):
+            metric_type, raw_label = metric_specs[j]
+            if metric_type is None:
+                continue
+            val, parsed_unit = _parse_value(tokens[j].group())
+            if val is None:
+                continue
+            unit = UNIT_OVERRIDES.get(metric_type, parsed_unit if parsed_unit != "unknown" else "number")
+            records.append({
+                "source": source,
+                "source_page": page_num,
+                "report_date": report_date,
+                "quarter": report_quarter,
+                "metric_period": report_date,
+                "period_type": "current",
+                "market": market,
+                "submarket": submarket,
+                "asset_class": current_asset,
+                "metric_type": metric_type,
+                "metric_value": val,
+                "unit": unit,
+                "confidence": 0.92,
+                "raw_text": line[:200],
+                "parser_strategy": "submarket_statistics",
+                "extraction_notes": f"Col: {raw_label}",
+            })
+
+        # Switch asset_class context after emitting the boundary row.
+        if is_industrial_total:
+            current_asset = "warehouse"
+        elif is_warehouse_total:
+            current_asset = asset_class  # reset
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Strategy 4: Side-by-side INDUSTRIAL / WAREHOUSE breakdowns (Silicon Valley)
+# ---------------------------------------------------------------------------
+
+def _parse_dual_breakdown(page, header: dict, source: str,
+                          page_num: int) -> list[dict] | None:
+    """Detect and parse side-by-side INDUSTRIAL/WAREHOUSE breakdowns.
+
+    Returns list of records, or None if this page doesn't have the dual layout.
+    """
+    text = page.extract_text() or ""
+    if not (re.search(r"INDUSTRIAL\s+MARKET\s+BREAKDOWN", text, re.IGNORECASE)
+            and re.search(r"WAREHOUSE\s+MARKET\s+BREAKDOWN", text, re.IGNORECASE)):
+        return None
+
+    words = page.extract_words(x_tolerance=2, y_tolerance=3)
+    rows = _group_rows(words)
+
+    dual_idx = None
+    waho_x = None
+    for i, row in enumerate(rows):
+        text_line = " ".join(w["text"] for w in row).upper()
+        if "INDUSTRIAL" in text_line and "WAREHOUSE" in text_line and "BREAKDOWN" in text_line:
+            dual_idx = i
+            for w in row:
+                if w["text"].upper() == "WAREHOUSE":
+                    waho_x = w["x0"]
+                    break
+            break
+    if dual_idx is None:
+        return None
+
+    split_x = (waho_x - 10) if waho_x else (page.width / 2)
+
+    industrial_lines: list[str] = []
+    warehouse_lines: list[str] = []
+    for row in rows[dual_idx:]:
+        line_upper = " ".join(w["text"] for w in row).upper()
+        if re.search(r"(DATA\s+SOURCE|KIDDER\s+MATHEWS\s+IS|COMMERCIAL\s+BROKERAGE)",
+                     line_upper):
+            break
+        left = [w for w in row if w["x0"] < split_x]
+        right = [w for w in row if w["x0"] >= split_x]
+        if left:
+            industrial_lines.append(" ".join(w["text"] for w in left))
+        if right:
+            warehouse_lines.append(" ".join(w["text"] for w in right))
+
+    records: list[dict] = []
+    for side_lines, ac in [
+        (industrial_lines, "industrial"),
+        (warehouse_lines, "warehouse"),
+    ]:
+        synthetic = "\n".join(side_lines)
+        # Ensure the synthetic text contains a BREAKDOWN keyword so
+        # _parse_structured_table doesn't bail out searching for it.
+        if "BREAKDOWN" not in synthetic.upper():
+            synthetic = "MARKET BREAKDOWN\n" + synthetic
+        side_header = {**header, "asset_class": ac}
+        side_records = _parse_structured_table(
+            synthetic, side_header, source, page_num, submarket=None,
+        )
+        for r in side_records:
+            r["parser_strategy"] = "dual_breakdown"
+            r["extraction_notes"] = f"{ac} side | " + (r.get("extraction_notes") or "")
+        records.extend(side_records)
+
+    return records
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 def parse_pdf(filepath: str) -> list[dict]:
     """
     Parse a Kidder Mathews PDF and return a list of metric dicts.
-    Auto-detects structured vs narrative strategy.
+    Auto-detects structured / dual-breakdown / submarket-statistics / narrative
+    strategies.
     """
+    PARSER_WARNINGS.clear()
     source = os.path.basename(filepath)
     all_records = []
 
@@ -761,16 +1276,34 @@ def parse_pdf(filepath: str) -> list[dict]:
             page_breaks.append(offset)
 
         full_text = "\n".join(pages)
-        header = _detect_header(pages[0])
+        header = _detect_header(pages[0], filepath=filepath)
 
-        if not header["quarter"] or not header["asset_class"]:
+        if not header["quarter"]:
+            _warn(f"{source}: could not detect quarter from header — skipping.")
+            return []
+        if not header["asset_class"]:
+            _warn(f"{source}: could not detect asset class from header — skipping.")
+            return []
+        if not header["market"]:
+            _warn(f"{source}: could not detect market — skipping (records would be rejected).")
             return []
 
-        # --- Structured parsing ---
-        has_structured = False
+        # --- Dual-breakdown (Silicon Valley page 1) ---
+        # Try this BEFORE single-table structured parsing to avoid the
+        # single-table parser mashing both columns together.
+        dual_pages_handled: set[int] = set()
+        for i, page in enumerate(pdf.pages):
+            dual_recs = _parse_dual_breakdown(page, header, source, i + 1)
+            if dual_recs:
+                all_records.extend(dual_recs)
+                dual_pages_handled.add(i)
+
+        # --- Structured parsing (single MARKET BREAKDOWN/SUMMARY tables) ---
+        has_structured = bool(dual_pages_handled)
         for i, page_text in enumerate(pages):
+            if i in dual_pages_handled:
+                continue
             submarket = None
-            # Detect submarket from page header
             sub_match = re.search(
                 r"(?:^|\n)\s*(ADA COUNTY|CANYON COUNTY)\s*(?:\n|$)",
                 page_text[:200]
@@ -778,20 +1311,25 @@ def parse_pdf(filepath: str) -> list[dict]:
             if sub_match:
                 submarket = sub_match.group(1).strip().title()
 
-            # Check for BREAKDOWN or SUMMARY — these may be on separate lines
-            # from "MARKET" due to column headers between them
             if re.search(r"(?:^|\n)\s*BREAKDOWN\s*(?:\n|$)", page_text, re.IGNORECASE) or \
-               re.search(r"MARKET\s+SUMMARY", page_text, re.IGNORECASE):
+               re.search(r"MARKET\s+SUMMARY", page_text, re.IGNORECASE) or \
+               re.search(r"MARKET\s+BREAKDOWN", page_text, re.IGNORECASE):
                 recs = _parse_structured_table(page_text, header, source, i + 1, submarket)
                 if recs:
                     has_structured = True
                     all_records.extend(recs)
 
+        # --- SUBMARKET STATISTICS table (East Bay, Orange County, Silicon Valley) ---
+        for i, page in enumerate(pdf.pages):
+            sub_recs = _parse_submarket_statistics(page, header, source, i + 1)
+            all_records.extend(sub_recs)
+
         # --- Sidebar parsing (page 1 only) ---
         sidebar_records = _parse_sidebar(pages[0], header, source, 1)
-        existing = {(r["metric_type"], r["period_type"], r.get("submarket")) for r in all_records}
+        existing = {(r["metric_type"], r["period_type"], r.get("submarket"), r.get("asset_class"))
+                    for r in all_records}
         for sr in sidebar_records:
-            key = (sr["metric_type"], sr["period_type"], sr.get("submarket"))
+            key = (sr["metric_type"], sr["period_type"], sr.get("submarket"), sr.get("asset_class"))
             if key not in existing:
                 all_records.append(sr)
 
@@ -810,3 +1348,8 @@ def parse_pdf(filepath: str) -> list[dict]:
                     all_records.append(cr)
 
     return all_records
+
+
+def get_warnings() -> list[str]:
+    """Return warnings emitted by the most recent parse_pdf call."""
+    return list(PARSER_WARNINGS)
