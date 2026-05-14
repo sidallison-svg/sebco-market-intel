@@ -411,7 +411,6 @@ def _parse_sidebar(page_text: str, header: dict, source: str, page_num: int) -> 
         (r"VACANCY\s*RATE", "vacancy_rate", "percent", r"^([\d.]+)%$"),
         (r"ASKING\s*RENT", "asking_rent", "dollar_per_sf", r"^\$([\d.]+)$"),
         (r"NET\s*ABSORPTION", "net_absorption", "sf", r"^(-?[\d,.]+[MKB]?)\s*SF$"),
-        (r"UNDER\s*\n?\s*CONSTRUCTION", "under_construction", "sf", r"^([\d,.]+[MKB]?)\s*SF$"),
     ]
 
     for label_re, metric_type, unit, val_re in sidebar_defs:
@@ -450,6 +449,79 @@ def _parse_sidebar(page_text: str, header: dict, source: str, page_num: int) -> 
                             })
                         break
                 break  # Only match the first occurrence of each label
+
+    # Under Construction sidebar — "UNDER" and "CONSTRUCTION" are often on
+    # separate lines (or CONSTRUCTION is at the end of a paragraph line).
+    # Search for any line containing "CONSTRUCTION" (not preceded by "&"),
+    # verify "UNDER" appears on a nearby preceding line, then look further
+    # back for the value.
+    for i, line in enumerate(lines):
+        if re.search(r"(?<![&\w])CONSTRUCTION", line) and not re.search(r"UNDER CONSTRUCTION &", line):
+            # Check that "UNDER" appears within 3 lines before
+            has_under = any(
+                "UNDER" in lines[j] for j in range(max(0, i - 3), i + 1)
+            )
+            if not has_under:
+                continue
+            # Search backwards for a short SF value line
+            for j in range(max(0, i - 6), i):
+                prev = lines[j].strip()
+                if len(prev) > 20:
+                    continue
+                vm = re.match(r"^([\d,.]+[MKB]?)\s*SF$", prev, re.IGNORECASE)
+                if vm:
+                    raw = vm.group(1).replace(",", "")
+                    val, _ = _parse_value(raw)
+                    if val is not None:
+                        records.append({
+                            "source": source,
+                            "source_page": page_num,
+                            "report_date": report_date,
+                            "quarter": report_quarter,
+                            "metric_period": report_date,
+                            "period_type": "current",
+                            "market": header["market"],
+                            "submarket": None,
+                            "asset_class": header["asset_class"],
+                            "metric_type": "under_construction",
+                            "metric_value": val,
+                            "unit": "sf",
+                            "confidence": 0.90,
+                            "raw_text": f"{prev} ... UNDER CONSTRUCTION",
+                            "parser_strategy": "sidebar",
+                            "extraction_notes": "Under construction from sidebar callout",
+                        })
+                    break
+            break
+
+    # Total inventory from narrative text:
+    # "Total inventory was 410M SF" or "ended at 409.7M SF"
+    inv_m = re.search(
+        r"(?:Total\s+inventory\s+was|ended\s+at|inventory\s+of)\s+([\d,.]+[MKB]?)\s*SF",
+        page_text, re.IGNORECASE
+    )
+    if inv_m:
+        raw = inv_m.group(1).replace(",", "")
+        val, _ = _parse_value(raw)
+        if val is not None:
+            records.append({
+                "source": source,
+                "source_page": page_num,
+                "report_date": report_date,
+                "quarter": report_quarter,
+                "metric_period": report_date,
+                "period_type": "current",
+                "market": header["market"],
+                "submarket": None,
+                "asset_class": header["asset_class"],
+                "metric_type": "total_inventory",
+                "metric_value": val,
+                "unit": "sf",
+                "confidence": 0.85,
+                "raw_text": inv_m.group(0).strip(),
+                "parser_strategy": "narrative",
+                "extraction_notes": "Total inventory from narrative text",
+            })
 
     # Cap rate from narrative
     cap_m = re.search(
@@ -621,8 +693,12 @@ def _parse_narrative_submarkets(full_text: str, header: dict, source: str,
             r"(?:blended|average\s+blended)\s+(?:rate|rent)\s+(?:of|remains?\s+at|is|was|at)\s+\$([\d.]+)",
             # "average blended rate of $X.XX" with words between
             r"average\s+blended\s+rate\s+of\s+\$([\d.]+)",
-            # "to $X.XX PSF" near "rent/rate" (prefer "to" values over "from")
-            r"(?:rents?|rates?)\s+(?:fell|declined|dropped).{0,80}?to\s+\$([\d.]+)\s*PSF",
+            # "rates remain stable at $X.XX PSF"
+            r"[Rr](?:ental\s+)?ates?\s+remain\s+stable\s+at\s+\$([\d.]+)\s*PSF",
+            # "to $X.XX PSF" near "rent/rate" (prefer "to" values)
+            r"(?:rents?|rates?)\s+(?:fell|declined|dropped|dipped).{0,100}?to.{0,80}?\$([\d.]+)\s*PSF",
+            # "ending the year at $X.XX" (for rates that held through current quarter)
+            r"ending\s+the\s+year\s+at\s+\$([\d.]+)",
             # "$X.XX PSF" near "blended" or "asking"
             r"(?:blended|asking).{0,60}?\$([\d.]+)\s*PSF",
             # "Rent has fallen to $X.XX PSF"
@@ -630,7 +706,7 @@ def _parse_narrative_submarkets(full_text: str, header: dict, source: str,
             # "rent remains at $X.XX PSF"
             r"[Rr]ent\s+(?:remains?|remained|is|was)\s+(?:at\s+)?\$([\d.]+)",
             # "rates declined/fell ... $X.XX PSF"
-            r"rates?\s+(?:declined|fell|dropped).{0,60}?\$([\d.]+)\s*PSF",
+            r"rates?\s+(?:declined|fell|dropped|dipped).{0,60}?\$([\d.]+)\s*PSF",
         ]
         for rp in rent_patterns:
             rm = re.search(rp, section, re.IGNORECASE | re.DOTALL)
