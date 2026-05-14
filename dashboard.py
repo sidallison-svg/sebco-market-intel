@@ -12,11 +12,11 @@ Pages:
 import getpass
 import io
 import os
+import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -38,7 +38,7 @@ from pdf_parser import parse_pdf
 
 st.set_page_config(
     page_title="Sebco Market Intel",
-    page_icon="📊",
+    page_icon="\U0001f4ca",
     layout="wide",
 )
 
@@ -46,6 +46,32 @@ CONFIDENCE_COLORS = {
     "high": "#2ecc71",    # >= 0.90
     "medium": "#f39c12",  # >= 0.75
     "low": "#e74c3c",     # < 0.75
+}
+
+LOW_CONFIDENCE_THRESHOLD = 0.85
+
+# ---------------------------------------------------------------------------
+# Metric glossary and filter help text
+# ---------------------------------------------------------------------------
+
+METRIC_GLOSSARY = {
+    "vacancy_rate": "Percentage of total inventory currently unoccupied and available for lease.",
+    "lease_rate": "Average asking rental rate per square foot, typically quoted as monthly NNN (triple net).",
+    "net_absorption": "Net change in occupied space over the period. Positive = more space occupied, negative = more space vacated.",
+    "total_inventory": "Total rentable building area (square feet) tracked in this market/submarket.",
+    "under_construction": "Square footage of new buildings currently being built but not yet delivered.",
+    "cap_rate": "Capitalization rate \u2014 ratio of net operating income to property value. Lower cap rate = higher property prices.",
+    "sale_price_per_sf": "Average sale price per square foot for transactions in the period.",
+    "yoy_rent_change": "Year-over-year percentage change in asking lease rates.",
+    "yoy_vacancy_change": "Year-over-year change in vacancy rate (in percentage points).",
+}
+
+FILTER_HELP = {
+    "market": "Geographic market area (e.g., Seattle, Boise, Inland Empire).",
+    "metric": "The data metric to display. Hover the ? icon after selecting a metric for its definition.",
+    "submarket": "A sub-area within the market. Select '(all)' to overlay all submarkets.",
+    "period_type": "When the metric was measured: current = report quarter, prior_quarter, prior_year, yoy_change = year-over-year delta.",
+    "source": "The PDF filename from which data was extracted.",
 }
 
 
@@ -59,10 +85,192 @@ def confidence_label(val: float | None) -> str:
     return "low"
 
 
-def confidence_dot(val: float | None) -> str:
-    label = confidence_label(val)
-    color = CONFIDENCE_COLORS.get(label, "#999")
-    return f'<span style="color:{color}; font-size:1.2em;">●</span> {label} ({val:.0%})'
+def _metric_help(metric_type: str) -> str:
+    """Return glossary tooltip for a metric type."""
+    return METRIC_GLOSSARY.get(metric_type, "")
+
+
+def _format_value(val, unit: str) -> str:
+    """Format a metric value with unit."""
+    if val is None:
+        return "\u2014"
+    if unit == "percent":
+        return f"{val:.1f}%"
+    elif unit == "dollar_per_sf":
+        return f"${val:.2f}/SF"
+    elif unit == "sf":
+        if abs(val) >= 1_000_000:
+            return f"{val / 1_000_000:.1f}M SF"
+        elif abs(val) >= 1_000:
+            return f"{val / 1_000:.0f}K SF"
+        else:
+            return f"{val:,.0f} SF"
+    return f"{val:,.2f}"
+
+
+def _format_value_short(val, unit: str) -> str:
+    """Format for comparison table (shorter, no SF suffix)."""
+    if val is None:
+        return "\u2014"
+    if unit == "percent":
+        return f"{val:.1f}%"
+    elif unit == "dollar_per_sf":
+        return f"${val:.2f}"
+    elif unit == "sf" and abs(val) >= 1_000_000:
+        return f"{val / 1_000_000:.1f}M"
+    elif unit == "sf" and abs(val) >= 1_000:
+        return f"{val / 1_000:.0f}K"
+    return f"{val:,.0f}"
+
+
+def _warn_suffix(confidence: float | None) -> str:
+    """Return warning marker if confidence is below threshold."""
+    if confidence is not None and confidence < LOW_CONFIDENCE_THRESHOLD:
+        return " \u26a0\ufe0f"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Smart search
+# ---------------------------------------------------------------------------
+
+METRIC_KEYWORDS = {
+    "vacancy": "vacancy_rate",
+    "vacant": "vacancy_rate",
+    "lease": "lease_rate",
+    "rent": "lease_rate",
+    "rental": "lease_rate",
+    "absorption": "net_absorption",
+    "absorb": "net_absorption",
+    "inventory": "total_inventory",
+    "construction": "under_construction",
+    "cap": "cap_rate",
+    "capitalization": "cap_rate",
+    "sale": "sale_price_per_sf",
+    "price": "sale_price_per_sf",
+}
+
+PAGE_KEYWORDS = {
+    "upload": "Upload",
+    "import": "Upload",
+    "summary": "Summary",
+    "overview": "Summary",
+    "latest": "Summary",
+    "trend": "Trends",
+    "chart": "Trends",
+    "graph": "Trends",
+    "history": "Trends",
+    "over time": "Trends",
+    "compare": "Comparison",
+    "comparison": "Comparison",
+    "versus": "Comparison",
+    "vs": "Comparison",
+    "side by side": "Comparison",
+    "raw": "Raw Data",
+    "export": "Raw Data",
+    "csv": "Raw Data",
+    "edit": "Raw Data",
+    "all data": "Raw Data",
+}
+
+
+def _parse_search(query: str, known_markets: list[str], known_submarkets: list[str]) -> dict:
+    """Parse a natural-language search query into filter components."""
+    result = {"page": None, "market": None, "submarket": None, "metric": None}
+    if not query:
+        return result
+
+    q_lower = query.lower().strip()
+    tokens = q_lower.split()
+
+    # Match markets (case-insensitive substring, longest match first)
+    for m in sorted(known_markets, key=len, reverse=True):
+        if m.lower() in q_lower:
+            result["market"] = m
+            break
+
+    # Match submarkets (longest match first)
+    for s in sorted(known_submarkets, key=len, reverse=True):
+        if s.lower() in q_lower:
+            result["submarket"] = s
+            break
+
+    # Match metric keywords
+    for token in tokens:
+        if token in METRIC_KEYWORDS:
+            result["metric"] = METRIC_KEYWORDS[token]
+            break
+
+    # Match page keywords (check multi-word first, then single-word)
+    for phrase, page_name in sorted(PAGE_KEYWORDS.items(), key=lambda x: -len(x[0])):
+        if phrase in q_lower:
+            result["page"] = page_name
+            break
+
+    # Infer best page if not explicit
+    if result["page"] is None:
+        if result["metric"]:
+            result["page"] = "Trends"
+        elif result["market"] or result["submarket"]:
+            result["page"] = "Summary"
+
+    return result
+
+
+def _render_search_bar():
+    """Render the smart search bar at the top of the main content area."""
+    query = st.text_input(
+        "Quick search",
+        placeholder="e.g., Boise vacancy, Q1 2026 Seattle rent, compare submarkets",
+        key="smart_search_input",
+        help=(
+            "Type keywords to jump to relevant data. "
+            "Try market names, metrics (vacancy, rent, absorption), "
+            "or page names (trend, compare, raw)."
+        ),
+        label_visibility="collapsed",
+    )
+
+    if not query or query == st.session_state.get("_last_search_applied"):
+        return
+
+    st.session_state["_last_search_applied"] = query
+
+    rows = get_all_metrics()
+    if not rows:
+        return
+
+    df = pd.DataFrame(rows)
+    known_markets = sorted(df["market"].unique().tolist())
+    known_subs = sorted(df["submarket"].dropna().unique().tolist())
+    parsed = _parse_search(query, known_markets, known_subs)
+
+    need_rerun = False
+
+    if parsed["page"]:
+        st.session_state["nav_page"] = parsed["page"]
+        need_rerun = True
+    if parsed["market"]:
+        st.session_state["_search_market"] = parsed["market"]
+        need_rerun = True
+    if parsed["submarket"]:
+        st.session_state["_search_submarket"] = parsed["submarket"]
+        need_rerun = True
+    if parsed["metric"]:
+        st.session_state["_search_metric"] = parsed["metric"]
+        need_rerun = True
+
+    if need_rerun:
+        st.rerun()
+
+
+def _consume_search_filters() -> dict:
+    """Pop and return any pending search filter values from session state."""
+    return {
+        "market": st.session_state.pop("_search_market", None),
+        "submarket": st.session_state.pop("_search_submarket", None),
+        "metric": st.session_state.pop("_search_metric", None),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -84,12 +292,19 @@ setup_db()
 page = st.sidebar.radio(
     "Navigation",
     ["Upload", "Summary", "Trends", "Comparison", "Raw Data"],
+    key="nav_page",
 )
 
 db_path = get_db_path()
 st.sidebar.markdown("---")
 st.sidebar.caption(f"DB: `{os.path.basename(db_path)}`")
 st.sidebar.caption(f"User: `{getpass.getuser()}`")
+
+# ---------------------------------------------------------------------------
+# Smart search bar (rendered at the top of every page)
+# ---------------------------------------------------------------------------
+
+_render_search_bar()
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +374,7 @@ def page_upload():
             quarter = records[0].get("quarter", "Unknown")
             st.markdown(f"**{market}** | **{asset.title()}** | **{quarter}**")
 
-            # Show current-period data
+            # Show current-period data (confidence kept on upload preview)
             if len(current):
                 show_cols = ["submarket", "metric_type", "metric_value",
                             "unit", "confidence", "parser_strategy"]
@@ -193,6 +408,8 @@ def page_summary():
     st.header("Market Summary")
     st.markdown("Latest extracted values per market and submarket.")
 
+    _consume_search_filters()  # consume to avoid stale state
+
     rows = get_all_metrics()
     if not rows:
         st.info("No data yet. Upload some PDFs first.")
@@ -211,6 +428,8 @@ def page_summary():
     idx = current.groupby(["market", "submarket", "metric_type"])["metric_period"].idxmax()
     latest = current.loc[idx].copy()
 
+    has_warnings = (latest["confidence"] < LOW_CONFIDENCE_THRESHOLD).any()
+
     # Pivot for display
     for market in latest["market"].unique():
         st.subheader(market)
@@ -226,6 +445,9 @@ def page_summary():
             sub_data = mkt_data[mkt_data["submarket"] == sub]
             _show_metric_cards(sub_data, sub)
 
+    if has_warnings:
+        st.caption("\u26a0\ufe0f = confidence below 85%. Verify on the Raw Data page.")
+
 
 def _show_metric_cards(df: pd.DataFrame, label: str):
     """Display metric values as a row of cards."""
@@ -233,23 +455,14 @@ def _show_metric_cards(df: pd.DataFrame, label: str):
     cols = st.columns(min(len(df), 6))
     for i, (_, row) in enumerate(df.iterrows()):
         with cols[i % len(cols)]:
-            metric = row["metric_type"].replace("_", " ").title()
+            metric_type = row["metric_type"]
+            metric_display = metric_type.replace("_", " ").title()
             val = row["metric_value"]
             unit = row["unit"]
+            confidence = row["confidence"]
 
-            if unit == "percent":
-                display = f"{val:.1f}%"
-            elif unit == "dollar_per_sf":
-                display = f"${val:.2f}/SF"
-            elif unit == "sf":
-                if abs(val) >= 1_000_000:
-                    display = f"{val/1_000_000:.1f}M SF"
-                elif abs(val) >= 1_000:
-                    display = f"{val/1_000:.0f}K SF"
-                else:
-                    display = f"{val:,.0f} SF"
-            else:
-                display = f"{val:,.2f}"
+            display = _format_value(val, unit)
+            warn = _warn_suffix(confidence)
 
             period = row["metric_period"]
             if pd.notna(period):
@@ -257,10 +470,20 @@ def _show_metric_cards(df: pd.DataFrame, label: str):
             else:
                 period_str = ""
 
+            # Build help text: glossary + period
+            help_parts = []
+            glossary = _metric_help(metric_type)
+            if glossary:
+                help_parts.append(glossary)
+            if period_str:
+                help_parts.append(f"Period: {period_str}")
+            if warn:
+                help_parts.append("Confidence below 85% \u2014 verify in Raw Data")
+
             st.metric(
-                label=metric,
-                value=display,
-                help=f"Confidence: {confidence_label(row['confidence'])} | {period_str}",
+                label=metric_display,
+                value=display + warn,
+                help=" | ".join(help_parts) if help_parts else None,
             )
     st.markdown("---")
 
@@ -283,18 +506,52 @@ def page_trends():
     df = df[df["period_type"].isin(["current", "prior_quarter", "prior_year", "historical"])]
     df["metric_period"] = pd.to_datetime(df["metric_period"])
 
+    # Consume search filters
+    search = _consume_search_filters()
+
     # Filters
     col1, col2, col3 = st.columns(3)
+
+    markets = sorted(df["market"].unique())
+
+    # Apply search market before widget renders
+    if search["market"] and search["market"] in markets:
+        st.session_state["trend_market"] = search["market"]
+
     with col1:
-        markets = sorted(df["market"].unique())
-        sel_market = st.selectbox("Market", markets)
+        sel_market = st.selectbox("Market", markets, key="trend_market",
+                                  help=FILTER_HELP["market"])
+
+    metric_types = sorted(df[df["market"] == sel_market]["metric_type"].unique())
+
+    # Apply search metric before widget renders
+    if search["metric"] and search["metric"] in metric_types:
+        st.session_state["trend_metric"] = search["metric"]
+    elif "trend_metric" in st.session_state and st.session_state["trend_metric"] not in metric_types:
+        del st.session_state["trend_metric"]
+
+    # Build metric help text showing selected metric's definition
+    current_metric = st.session_state.get("trend_metric", metric_types[0] if metric_types else "")
+    metric_help = FILTER_HELP["metric"]
+    glossary = _metric_help(current_metric)
+    if glossary:
+        metric_help += f"\n\n{current_metric.replace('_', ' ').title()}: {glossary}"
+
     with col2:
-        metric_types = sorted(df[df["market"] == sel_market]["metric_type"].unique())
-        sel_metric = st.selectbox("Metric", metric_types)
+        sel_metric = st.selectbox("Metric", metric_types, key="trend_metric",
+                                  help=metric_help)
+
+    subs = df[(df["market"] == sel_market) & (df["metric_type"] == sel_metric)]["submarket"]
+    sub_options = ["(all)"] + sorted(subs.dropna().unique().tolist())
+
+    if search["submarket"] and search["submarket"] in sub_options:
+        st.session_state["trend_sub"] = search["submarket"]
+    elif "trend_sub" in st.session_state and st.session_state["trend_sub"] not in sub_options:
+        del st.session_state["trend_sub"]
+
     with col3:
-        subs = df[(df["market"] == sel_market) & (df["metric_type"] == sel_metric)]["submarket"]
-        sub_options = ["(all)"] + sorted(subs.dropna().unique().tolist())
-        sel_sub = st.selectbox("Submarket", sub_options)
+        sel_sub = st.selectbox("Submarket", sub_options, key="trend_sub",
+                               help=FILTER_HELP["submarket"])
 
     # Filter data
     filtered = df[(df["market"] == sel_market) & (df["metric_type"] == sel_metric)]
@@ -311,9 +568,10 @@ def page_trends():
     )
 
     # Create label for chart
+    filtered = filtered.copy()
     filtered["label"] = filtered["submarket"].fillna("Market-wide")
 
-    # Plot
+    # Build chart with per-series control
     unit = filtered["unit"].iloc[0]
     y_label = sel_metric.replace("_", " ").title()
     if unit == "percent":
@@ -321,21 +579,77 @@ def page_trends():
     elif unit == "dollar_per_sf":
         y_label += " ($/SF)"
 
-    fig = px.line(
-        filtered.sort_values("metric_period"),
-        x="metric_period",
-        y="metric_value",
-        color="label",
-        markers=True,
-        labels={"metric_period": "Period", "metric_value": y_label, "label": "Submarket"},
+    fig = go.Figure()
+
+    for label_name in sorted(filtered["label"].unique()):
+        series = filtered[filtered["label"] == label_name].sort_values("metric_period")
+        n_points = len(series)
+        legend_name = f"{label_name} (n={n_points})"
+
+        dates = series["metric_period"].tolist()
+        values = series["metric_value"].tolist()
+
+        if n_points < 4:
+            # Dots only for sparse data
+            fig.add_trace(go.Scatter(
+                x=dates,
+                y=values,
+                mode="markers",
+                name=legend_name,
+                marker=dict(size=9),
+                hovertemplate="%{x|%b %Y}: %{y}<extra>%{fullData.name}</extra>",
+            ))
+        else:
+            # Lines with markers, break connections where gap > 6 months
+            x_vals = []
+            y_vals = []
+            for i in range(len(dates)):
+                if i > 0 and (dates[i] - dates[i - 1]).days > 180:
+                    x_vals.append(dates[i - 1] + (dates[i] - dates[i - 1]) / 2)
+                    y_vals.append(None)
+                x_vals.append(dates[i])
+                y_vals.append(values[i])
+
+            fig.add_trace(go.Scatter(
+                x=x_vals,
+                y=y_vals,
+                mode="lines+markers",
+                name=legend_name,
+                marker=dict(size=6),
+                connectgaps=False,
+                hovertemplate="%{x|%b %Y}: %{y}<extra>%{fullData.name}</extra>",
+            ))
+
+    # X-axis range: cover all data with padding
+    all_dates = filtered["metric_period"]
+    min_date = all_dates.min()
+    max_date = all_dates.max()
+    padding = timedelta(days=45)
+    fig.update_xaxes(range=[min_date - padding, max_date + padding])
+
+    fig.update_layout(
+        height=450,
+        xaxis_title="Period",
+        yaxis_title=y_label,
+        legend_title="Submarket",
+        hovermode="closest",
     )
-    fig.update_layout(height=450)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Data table below chart
+    # Metric definition caption
+    help_text = _metric_help(sel_metric)
+    if help_text:
+        st.caption(f"**{sel_metric.replace('_', ' ').title()}**: {help_text}")
+
+    # Low-confidence warning
+    has_warnings = (filtered["confidence"] < LOW_CONFIDENCE_THRESHOLD).any()
+    if has_warnings:
+        st.caption("\u26a0\ufe0f Some data points have confidence below 85%. Check the Raw Data page to verify.")
+
+    # Data table below chart (confidence hidden)
     with st.expander("Show data table"):
-        show = filtered[["label", "metric_period", "metric_value", "unit", "source", "confidence"]].copy()
-        show.columns = ["Submarket", "Period", "Value", "Unit", "Source", "Confidence"]
+        show = filtered[["label", "metric_period", "metric_value", "unit", "source"]].copy()
+        show.columns = ["Submarket", "Period", "Value", "Unit", "Source"]
         show = show.sort_values(["Submarket", "Period"])
         st.dataframe(show, use_container_width=True, hide_index=True)
 
@@ -356,6 +670,8 @@ def page_comparison():
     df = df[df["period_type"] == "current"]
     df["metric_period"] = pd.to_datetime(df["metric_period"])
 
+    _consume_search_filters()
+
     # Build submarket list with market prefix
     df["full_sub"] = df.apply(
         lambda r: f"{r['market']} - {r['submarket']}" if pd.notna(r["submarket"]) else f"{r['market']} (market-wide)",
@@ -369,9 +685,11 @@ def page_comparison():
 
     col1, col2 = st.columns(2)
     with col1:
-        sub1 = st.selectbox("Submarket A", subs, index=0)
+        sub1 = st.selectbox("Submarket A", subs, index=0,
+                            help="First submarket to compare.")
     with col2:
-        sub2 = st.selectbox("Submarket B", subs, index=min(1, len(subs) - 1))
+        sub2 = st.selectbox("Submarket B", subs, index=min(1, len(subs) - 1),
+                            help="Second submarket to compare.")
 
     if sub1 == sub2:
         st.warning("Select two different submarkets to compare.")
@@ -403,28 +721,36 @@ def page_comparison():
         r1 = m1.get(mt)
         r2 = m2.get(mt)
 
-        def fmt(row):
+        def _fmt(row):
             if row is None:
-                return "—"
-            v = row["metric_value"]
-            u = row["unit"]
-            if u == "percent":
-                return f"{v:.1f}%"
-            elif u == "dollar_per_sf":
-                return f"${v:.2f}"
-            elif u == "sf" and abs(v) >= 1_000_000:
-                return f"{v / 1_000_000:.1f}M"
-            elif u == "sf" and abs(v) >= 1_000:
-                return f"{v / 1_000:.0f}K"
-            return f"{v:,.0f}"
+                return "\u2014"
+            display = _format_value_short(row["metric_value"], row["unit"])
+            display += _warn_suffix(row["confidence"])
+            return display
 
         comp_rows.append({
             "Metric": mt.replace("_", " ").title(),
-            sub1: fmt(r1),
-            sub2: fmt(r2),
+            sub1: _fmt(r1),
+            sub2: _fmt(r2),
         })
 
     st.table(pd.DataFrame(comp_rows))
+
+    # Check if any values have low confidence
+    all_rows = list(m1.values()) + list(m2.values())
+    has_warnings = any(
+        r["confidence"] is not None and r["confidence"] < LOW_CONFIDENCE_THRESHOLD
+        for r in all_rows
+    )
+    if has_warnings:
+        st.caption("\u26a0\ufe0f = confidence below 85%. Verify on the Raw Data page.")
+
+    # Metric glossary
+    with st.expander("Metric definitions"):
+        for mt in all_metrics:
+            glossary = _metric_help(mt)
+            if glossary:
+                st.markdown(f"**{mt.replace('_', ' ').title()}**: {glossary}")
 
 
 # ---------------------------------------------------------------------------
@@ -441,19 +767,29 @@ def page_raw_data():
 
     df = pd.DataFrame(rows)
 
+    search = _consume_search_filters()
+
     # Filters
     col1, col2, col3, col4 = st.columns(4)
+
+    markets = ["(all)"] + sorted(df["market"].unique().tolist())
+    if search["market"] and search["market"] in markets:
+        st.session_state["raw_market"] = search["market"]
+
     with col1:
-        markets = ["(all)"] + sorted(df["market"].unique().tolist())
-        sel_market = st.selectbox("Market", markets, key="raw_market")
+        sel_market = st.selectbox("Market", markets, key="raw_market",
+                                  help=FILTER_HELP["market"])
     with col2:
         period_types = ["(all)"] + sorted(df["period_type"].unique().tolist())
-        sel_period = st.selectbox("Period Type", period_types, key="raw_period")
+        sel_period = st.selectbox("Period Type", period_types, key="raw_period",
+                                  help=FILTER_HELP["period_type"])
     with col3:
         sources = ["(all)"] + sorted(df["source"].unique().tolist())
-        sel_source = st.selectbox("Source", sources, key="raw_source")
+        sel_source = st.selectbox("Source", sources, key="raw_source",
+                                  help=FILTER_HELP["source"])
     with col4:
-        search = st.text_input("Search", key="raw_search")
+        search_text = st.text_input("Search", key="raw_search",
+                                    help="Filter rows by text match across all columns.")
 
     filtered = df.copy()
     if sel_market != "(all)":
@@ -462,15 +798,15 @@ def page_raw_data():
         filtered = filtered[filtered["period_type"] == sel_period]
     if sel_source != "(all)":
         filtered = filtered[filtered["source"] == sel_source]
-    if search:
+    if search_text:
         mask = filtered.apply(
-            lambda r: search.lower() in str(r.values).lower(), axis=1
+            lambda r: search_text.lower() in str(r.values).lower(), axis=1
         )
         filtered = filtered[mask]
 
     st.markdown(f"**{len(filtered)} records**")
 
-    # Display columns
+    # Display columns (confidence kept on Raw Data page)
     display_cols = [
         "id", "source", "quarter", "market", "submarket", "metric_type",
         "metric_value", "unit", "metric_period", "period_type", "confidence",
