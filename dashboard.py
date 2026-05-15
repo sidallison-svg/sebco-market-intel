@@ -10,6 +10,7 @@ Pages:
 """
 
 import getpass
+import hashlib
 import io
 import os
 import re
@@ -22,16 +23,22 @@ import streamlit as st
 
 from config import get_db_path
 from database import (
-    check_source_exists,
+    STATUS_REJECTED,
     delete_by_source,
     delete_rejected_record,
+    delete_uploaded_file_row,
+    find_active_report,
     get_all_metrics,
     get_distinct_values,
+    get_file_by_hash,
     get_metrics_for_source,
     get_rejected_records,
+    get_upload_history,
     get_upload_summaries,
     init_db,
     insert_metrics,
+    record_uploaded_file,
+    supersede_file,
     update_metric,
 )
 from pdf_parser import get_warnings, parse_pdf
@@ -472,11 +479,39 @@ _render_search_bar()
 # Page: Upload
 # ---------------------------------------------------------------------------
 
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _report_identity(records: list[dict]) -> dict:
+    """Identity tuple for Layer 2. Deterministic: uses the first record,
+    which is stable per file given parse_pdf's fixed strategy order.
+    """
+    r0 = records[0]
+    return {
+        "market": r0.get("market"),
+        "asset_class": r0.get("asset_class"),
+        "report_date": r0.get("report_date"),
+        "quarter": r0.get("quarter"),
+    }
+
+
+def _fmt_dt(iso: str | None) -> str:
+    if not iso:
+        return "an earlier date"
+    try:
+        return datetime.fromisoformat(iso).strftime("%b %d, %Y at %H:%M")
+    except ValueError:
+        return iso[:19]
+
+
 def page_upload():
     st.header("Upload Kidder Mathews Reports")
     st.markdown(
         "Upload one or more Kidder Mathews quarterly market report PDFs. "
-        "The parser will extract key metrics automatically."
+        "Duplicate detection runs automatically: identical files are blocked, "
+        "and a different file for an already-loaded report prompts you to "
+        "replace or cancel."
     )
 
     uploaded_files = st.file_uploader(
@@ -485,93 +520,199 @@ def page_upload():
         accept_multiple_files=True,
     )
 
-    if uploaded_files:
-        for uf in uploaded_files:
-            st.subheader(f"Processing: {uf.name}")
+    if not uploaded_files:
+        return
 
-            # Check for duplicates
-            if check_source_exists(uf.name):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.warning(f"'{uf.name}' has already been imported.")
-                with col2:
-                    if st.button(f"Re-import", key=f"reimport_{uf.name}"):
-                        delete_by_source(uf.name)
-                        st.rerun()
-                    else:
-                        continue
+    for uf in uploaded_files:
+        file_bytes = bytes(uf.getbuffer())
+        file_hash = _sha256(file_bytes)
+        st.subheader(f"Processing: {uf.name}")
 
-            # Save to temp file and parse
+        # ---- Layer 1: exact-bytes duplicate ----
+        existing = get_file_by_hash(file_hash)
+        if existing:
+            when = _fmt_dt(existing.get("uploaded_at"))
+            orig = existing.get("original_filename") or uf.name
+            if existing.get("status") == STATUS_REJECTED:
+                st.error(
+                    f"This exact file was uploaded on {when} as '{orig}' and "
+                    f"produced **0 records** (marked rejected). It's recorded "
+                    f"so you don't keep retrying a broken file. If the parser "
+                    f"has since improved, delete the rejected entry from the "
+                    f"Uploads → Upload History section first."
+                )
+            else:
+                st.error(
+                    f"This file was already uploaded on {when} as '{orig}'. "
+                    f"No changes detected."
+                )
+            continue
+
+        # ---- Parse (cache by hash so button reruns don't re-parse) ----
+        cache_key = f"_parse_{file_hash}"
+        if cache_key not in st.session_state:
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                tmp.write(uf.getbuffer())
+                tmp.write(file_bytes)
                 tmp_path = tmp.name
-
             try:
                 with st.spinner("Parsing PDF..."):
                     records = parse_pdf(tmp_path)
                     parser_warnings = get_warnings()
-                    # Override source with original filename
                     for r in records:
                         r["source"] = uf.name
             finally:
                 os.unlink(tmp_path)
+            st.session_state[cache_key] = {
+                "records": records,
+                "warnings": parser_warnings,
+            }
 
-            for w in parser_warnings:
-                st.warning(w)
+        cached = st.session_state[cache_key]
+        records = cached["records"]
+        for w in cached["warnings"]:
+            st.warning(w)
 
-            if not records:
-                st.error(
-                    "Could not extract any data. This may not be a supported "
-                    "Kidder Mathews report format."
-                )
-                continue
+        file_meta_base = {
+            "file_hash": file_hash,
+            "original_filename": uf.name,
+            "display_name": format_display_name(uf.name),
+            "file_size_bytes": len(file_bytes),
+        }
 
-            # Show preview
-            df = pd.DataFrame(records)
-            current = df[df["period_type"] == "current"]
-
-            st.markdown(f"**Found {len(records)} records** "
-                       f"({len(current)} current-period)")
-
-            # Summary stats
-            market = records[0].get("market", "Unknown")
-            asset = records[0].get("asset_class", "Unknown")
-            quarter = records[0].get("quarter", "Unknown")
-            st.markdown(f"**{market}** | **{asset.title()}** | **{quarter}**")
-
-            # Show current-period data (confidence kept on upload preview)
-            if len(current):
-                show_cols = ["submarket", "metric_type", "metric_value",
-                            "unit", "confidence", "parser_strategy"]
-                st.dataframe(
-                    current[show_cols].fillna("(market-wide)"),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            # Confidence summary
-            high = len(df[df["confidence"] >= 0.90])
-            med = len(df[(df["confidence"] >= 0.75) & (df["confidence"] < 0.90)])
-            low = len(df[df["confidence"] < 0.75])
-            st.caption(
-                f"Confidence: {high} high, {med} medium, {low} low  "
-                f"| Review the Raw Data page to correct any parsing errors."
+        # ---- Edge case 9: zero records → record hash as rejected ----
+        if not records:
+            record_uploaded_file({
+                **file_meta_base,
+                "market": None,
+                "asset_class": None,
+                "report_date": None,
+                "quarter": None,
+                "record_count": 0,
+                "parser_strategy": None,
+                "status": STATUS_REJECTED,
+            })
+            st.session_state.pop(cache_key, None)
+            st.error(
+                "Could not extract any data — this may not be a supported "
+                "Kidder Mathews format. The file hash has been recorded and "
+                "marked **rejected** so you don't keep retrying it."
             )
+            continue
 
-            # Save button
-            if st.button(f"Save to database", key=f"save_{uf.name}"):
-                result = insert_metrics(records)
-                inserted = result["inserted"]
-                rejected = result["rejected"]
-                if rejected:
-                    st.warning(
-                        f"Saved {inserted} records from {uf.name}, "
-                        f"{rejected} rejected — view details on the Raw Data "
-                        f"page under “Rejected Records”."
+        identity = _report_identity(records)
+        strategies = ",".join(sorted({
+            r.get("parser_strategy") for r in records if r.get("parser_strategy")
+        }))
+
+        # ---- Preview ----
+        df = pd.DataFrame(records)
+        current = df[df["period_type"] == "current"]
+        st.markdown(
+            f"**Found {len(records)} records** ({len(current)} current-period)"
+        )
+        st.markdown(
+            f"**{identity['market']}** | "
+            f"**{(identity['asset_class'] or '').title()}** | "
+            f"**{identity['quarter']}**"
+        )
+        if len(current):
+            show_cols = ["submarket", "metric_type", "metric_value",
+                         "unit", "confidence", "parser_strategy"]
+            st.dataframe(
+                current[show_cols].fillna("(market-wide)"),
+                use_container_width=True,
+                hide_index=True,
+            )
+        high = len(df[df["confidence"] >= 0.90])
+        med = len(df[(df["confidence"] >= 0.75) & (df["confidence"] < 0.90)])
+        low = len(df[df["confidence"] < 0.75])
+        st.caption(
+            f"Confidence: {high} high, {med} medium, {low} low  "
+            f"| Review the Raw Data page to correct any parsing errors."
+        )
+
+        # ---- Layer 2: same report identity, different file ----
+        conflict = find_active_report(
+            identity["market"], identity["asset_class"],
+            identity["report_date"], identity["quarter"],
+        )
+
+        if conflict:
+            strat_changed = (conflict.get("parser_strategy") or "") != strategies
+            st.warning(
+                f"**A report for "
+                f"{identity['market']} "
+                f"{(identity['asset_class'] or '').title()} "
+                f"{identity['quarter']} is already loaded.**\n\n"
+                f"- **Existing:** `{conflict.get('original_filename')}` — "
+                f"{conflict.get('record_count')} records, uploaded "
+                f"{_fmt_dt(conflict.get('uploaded_at'))}\n"
+                f"- **New:** `{uf.name}` — {len(records)} records"
+                + (
+                    f"\n- ⚙️ Parser strategy changed since the existing "
+                    f"upload (`{conflict.get('parser_strategy')}` → "
+                    f"`{strategies}`) — replacing will re-extract with the "
+                    f"current parser."
+                    if strat_changed else ""
+                )
+            )
+            st.caption(
+                "Keeping both is intentionally not offered — two copies of "
+                "the same report would double-count every metric in Trends, "
+                "Summary, and Comparison."
+            )
+            c1, c2, _ = st.columns([1, 1, 3])
+            with c1:
+                if st.button("Replace existing data",
+                             type="primary", key=f"replace_{file_hash}"):
+                    deleted = supersede_file(conflict["id"])
+                    new_id = record_uploaded_file({
+                        **file_meta_base,
+                        **identity,
+                        "record_count": len(records),
+                        "parser_strategy": strategies,
+                        "status": "active",
+                    })
+                    result = insert_metrics(records, source_file_id=new_id)
+                    st.session_state.pop(cache_key, None)
+                    st.success(
+                        f"Replaced. Removed {deleted} old records from "
+                        f"'{conflict.get('original_filename')}' (kept as a "
+                        f"superseded entry in Upload History) and inserted "
+                        f"{result['inserted']} new records"
+                        + (f"; {result['rejected']} rejected."
+                           if result['rejected'] else ".")
                     )
-                else:
-                    st.success(f"Saved {inserted} records from {uf.name}")
-                st.rerun()
+                    st.rerun()
+            with c2:
+                if st.button("Cancel upload", key=f"cancel_{file_hash}"):
+                    st.session_state.pop(cache_key, None)
+                    st.info("Upload cancelled. No changes were made.")
+                    st.rerun()
+            continue
+
+        # ---- Normal path: no conflict ----
+        if st.button("Save to database", key=f"save_{file_hash}"):
+            new_id = record_uploaded_file({
+                **file_meta_base,
+                **identity,
+                "record_count": len(records),
+                "parser_strategy": strategies,
+                "status": "active",
+            })
+            result = insert_metrics(records, source_file_id=new_id)
+            inserted = result["inserted"]
+            rejected = result["rejected"]
+            st.session_state.pop(cache_key, None)
+            if rejected:
+                st.warning(
+                    f"Saved {inserted} records from {uf.name}, "
+                    f"{rejected} rejected — view details on the Raw Data "
+                    f"page under “Rejected Records”."
+                )
+            else:
+                st.success(f"Saved {inserted} records from {uf.name}")
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -685,13 +826,79 @@ def page_uploads():
         return v
     filtered = sorted(filtered, key=_sort_value, reverse=descending)
 
+    st.markdown("---")
     if not filtered:
         st.info("No uploads match these filters.")
+    else:
+        for s in filtered:
+            _render_upload_card(s)
+
+    _render_upload_history()
+
+
+def _render_upload_history():
+    """Audit trail: every uploaded_files row, including superseded and
+    rejected, so the user can see exactly what was replaced and when.
+    """
+    history = get_upload_history()
+    if not history:
         return
 
-    st.markdown("---")
-    for s in filtered:
-        _render_upload_card(s)
+    superseded = [h for h in history if h["status"] == "superseded"]
+    rejected = [h for h in history if h["status"] == "rejected"]
+    label = f"Upload History ({len(history)} total"
+    if superseded:
+        label += f", {len(superseded)} superseded"
+    if rejected:
+        label += f", {len(rejected)} rejected"
+    label += ")"
+
+    with st.expander(label):
+        st.caption(
+            "Full audit trail of every file processed. **Superseded** rows "
+            "were replaced by a newer upload of the same report; their "
+            "metric records were deleted but the file record is kept here. "
+            "**Rejected** rows produced zero records and are remembered so "
+            "the same broken file isn't retried."
+        )
+        hist_df = pd.DataFrame(history)
+        show_cols = [
+            "status", "display_name", "original_filename", "market",
+            "asset_class", "quarter", "record_count", "uploaded_at",
+            "uploaded_by", "parser_strategy",
+        ]
+        existing = [c for c in show_cols if c in hist_df.columns]
+        st.dataframe(
+            hist_df[existing],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "status": st.column_config.TextColumn(
+                    "Status", help="active · superseded · rejected"
+                ),
+                "display_name": st.column_config.TextColumn("Report"),
+                "original_filename": st.column_config.TextColumn("Source file"),
+                "uploaded_at": st.column_config.TextColumn("Uploaded"),
+            },
+        )
+
+        # Allow clearing a rejected entry so an improved parser can retry it.
+        if rejected:
+            st.markdown("**Clear a rejected file** (lets you re-upload it):")
+            rej_opts = {
+                f"{h['original_filename']} — rejected {_fmt_dt(h['uploaded_at'])}": h["id"]
+                for h in rejected
+            }
+            choice = st.selectbox(
+                "Rejected file", list(rej_opts.keys()),
+                key="clear_rejected_sel",
+            )
+            if st.button("Clear this rejected entry", key="clear_rejected_btn"):
+                delete_uploaded_file_row(rej_opts[choice])
+                st.success(
+                    "Rejected entry cleared. You can now re-upload this file."
+                )
+                st.rerun()
 
 
 def _render_upload_card(s: dict):

@@ -53,7 +53,33 @@ CREATE TABLE IF NOT EXISTS rejected_records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rejected_source ON rejected_records(source);
+
+CREATE TABLE IF NOT EXISTS uploaded_files (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash         TEXT NOT NULL UNIQUE,
+    original_filename TEXT NOT NULL,
+    display_name      TEXT,
+    file_size_bytes   INTEGER,
+    uploaded_at       TEXT NOT NULL,
+    uploaded_by       TEXT,
+    market            TEXT,
+    asset_class       TEXT,
+    report_date       TEXT,
+    quarter           TEXT,
+    record_count      INTEGER DEFAULT 0,
+    parser_strategy   TEXT,
+    status            TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE INDEX IF NOT EXISTS idx_uploaded_hash ON uploaded_files(file_hash);
+CREATE INDEX IF NOT EXISTS idx_uploaded_identity
+    ON uploaded_files(market, asset_class, report_date, quarter, status);
 """
+
+# Statuses for uploaded_files.status
+STATUS_ACTIVE = "active"
+STATUS_SUPERSEDED = "superseded"
+STATUS_REJECTED = "rejected"
 
 REQUIRED_FIELDS = (
     "source", "report_date", "quarter", "metric_period",
@@ -89,10 +115,105 @@ def _retry(func):
     return wrapper
 
 
+def _column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
 def init_db(db_path: str | None = None):
+    """Create tables and run idempotent migrations.
+
+    Migration steps (each guarded so re-running is a no-op):
+      1. Create all tables / indexes.
+      2. Add metrics.source_file_id if missing.
+      3. Backfill: for every distinct source already in metrics that has no
+         uploaded_files row, create a 'legacy:<source>' placeholder row and
+         point that source's metrics at it. This keeps the Uploads page and
+         the Layer-2 report-identity check consistent for pre-existing data
+         (we can't recover original bytes, hence the legacy: hash prefix —
+         it can never collide with a real 64-hex SHA-256).
+    """
     conn = _get_connection(db_path)
-    conn.executescript(SCHEMA_SQL)
-    conn.close()
+    try:
+        conn.executescript(SCHEMA_SQL)
+
+        if not _column_exists(conn, "metrics", "source_file_id"):
+            conn.execute("ALTER TABLE metrics ADD COLUMN source_file_id INTEGER")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_metrics_source_file_id "
+                "ON metrics(source_file_id)"
+            )
+
+        # Backfill legacy placeholder rows for any source not yet tracked.
+        orphan_sources = conn.execute(
+            """
+            SELECT m.source                AS source,
+                   MAX(m.market)           AS market,
+                   MAX(m.asset_class)      AS asset_class,
+                   MAX(m.report_date)      AS report_date,
+                   MAX(m.quarter)          AS quarter,
+                   MIN(m.date_ingested)    AS first_ingested,
+                   COUNT(*)                AS record_count,
+                   MAX(m.last_edited_by)   AS uploaded_by
+            FROM metrics m
+            WHERE m.source_file_id IS NULL
+            GROUP BY m.source
+            """
+        ).fetchall()
+
+        for row in orphan_sources:
+            legacy_hash = f"legacy:{row['source']}"
+            existing = conn.execute(
+                "SELECT id FROM uploaded_files WHERE file_hash = ?",
+                (legacy_hash,),
+            ).fetchone()
+            if existing:
+                file_id = existing["id"]
+            else:
+                cur = conn.execute(
+                    """INSERT INTO uploaded_files
+                       (file_hash, original_filename, display_name,
+                        file_size_bytes, uploaded_at, uploaded_by, market,
+                        asset_class, report_date, quarter, record_count,
+                        parser_strategy, status)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy_hash,
+                        row["source"],
+                        _display_name(row["source"]),
+                        None,
+                        row["first_ingested"] or datetime.now().isoformat(),
+                        row["uploaded_by"],
+                        row["market"],
+                        row["asset_class"],
+                        row["report_date"],
+                        row["quarter"],
+                        row["record_count"],
+                        "legacy-backfill",
+                        STATUS_ACTIVE,
+                    ),
+                )
+                file_id = cur.lastrowid
+            conn.execute(
+                "UPDATE metrics SET source_file_id = ? "
+                "WHERE source = ? AND source_file_id IS NULL",
+                (file_id, row["source"]),
+            )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _display_name(source: str | None) -> str:
+    """Local import to avoid a circular dependency at module load."""
+    if not source:
+        return ""
+    try:
+        from utils import format_display_name
+        return format_display_name(source)
+    except Exception:
+        return source or ""
 
 
 def _validate_record(r: dict) -> list[str]:
@@ -101,11 +222,14 @@ def _validate_record(r: dict) -> list[str]:
 
 
 @_retry
-def insert_metrics(records: list[dict], db_path: str | None = None) -> dict:
+def insert_metrics(records: list[dict], db_path: str | None = None,
+                   source_file_id: int | None = None) -> dict:
     """Insert parsed metric records.
 
     Records missing required fields are logged to rejected_records and skipped
-    rather than aborting the whole batch.
+    rather than aborting the whole batch. When source_file_id is given, every
+    inserted metric row is linked back to its uploaded_files entry so a later
+    supersede can delete exactly this upload's rows.
 
     Returns:
         {"inserted": int, "rejected": int, "rejected_ids": [int, ...]}
@@ -144,8 +268,9 @@ def insert_metrics(records: list[dict], db_path: str | None = None) -> dict:
                    (source, source_page, report_date, quarter, metric_period,
                     period_type, market, submarket, asset_class, metric_type,
                     metric_value, unit, confidence, raw_text, parser_strategy,
-                    extraction_notes, date_ingested, last_edited_by, last_edited_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    extraction_notes, date_ingested, last_edited_by,
+                    last_edited_at, source_file_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     r["source"], r.get("source_page"), r["report_date"],
                     r["quarter"], r["metric_period"], r["period_type"],
@@ -153,7 +278,7 @@ def insert_metrics(records: list[dict], db_path: str | None = None) -> dict:
                     r["metric_type"], r.get("metric_value"), r["unit"],
                     r.get("confidence"), r.get("raw_text"),
                     r.get("parser_strategy"), r.get("extraction_notes"),
-                    now, user, now,
+                    now, user, now, source_file_id,
                 ),
             )
             inserted += 1
@@ -165,6 +290,139 @@ def insert_metrics(records: list[dict], db_path: str | None = None) -> dict:
         "rejected": len(rejected_ids),
         "rejected_ids": rejected_ids,
     }
+
+
+@_retry
+def get_file_by_hash(file_hash: str, db_path: str | None = None) -> dict | None:
+    """Layer 1 — exact-bytes lookup. Returns the uploaded_files row or None."""
+    conn = _get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM uploaded_files WHERE file_hash = ?", (file_hash,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+@_retry
+def find_active_report(market: str, asset_class: str, report_date: str,
+                       quarter: str, db_path: str | None = None) -> dict | None:
+    """Layer 2 — same report identity, possibly a different file.
+
+    Returns the existing ACTIVE uploaded_files row for this
+    (market, asset_class, report_date, quarter) tuple, or None.
+    """
+    conn = _get_connection(db_path)
+    try:
+        row = conn.execute(
+            """SELECT * FROM uploaded_files
+               WHERE market = ? AND asset_class = ? AND report_date = ?
+                 AND quarter = ? AND status = ?
+               ORDER BY uploaded_at DESC LIMIT 1""",
+            (market, asset_class, report_date, quarter, STATUS_ACTIVE),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+@_retry
+def record_uploaded_file(meta: dict, db_path: str | None = None) -> int:
+    """Insert an uploaded_files row and return its new id.
+
+    `meta` keys: file_hash, original_filename, display_name,
+    file_size_bytes, market, asset_class, report_date, quarter,
+    record_count, parser_strategy, status.
+    """
+    conn = _get_connection(db_path)
+    now = datetime.now().isoformat()
+    user = getpass.getuser()
+    try:
+        cur = conn.execute(
+            """INSERT INTO uploaded_files
+               (file_hash, original_filename, display_name, file_size_bytes,
+                uploaded_at, uploaded_by, market, asset_class, report_date,
+                quarter, record_count, parser_strategy, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                meta["file_hash"],
+                meta["original_filename"],
+                meta.get("display_name"),
+                meta.get("file_size_bytes"),
+                now,
+                user,
+                meta.get("market"),
+                meta.get("asset_class"),
+                meta.get("report_date"),
+                meta.get("quarter"),
+                meta.get("record_count", 0),
+                meta.get("parser_strategy"),
+                meta.get("status", STATUS_ACTIVE),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+@_retry
+def supersede_file(file_id: int, db_path: str | None = None) -> int:
+    """Mark an uploaded_files row superseded and delete its metric rows.
+
+    Returns the number of metric rows deleted. The uploaded_files row is
+    kept (status='superseded') as the audit trail.
+    """
+    conn = _get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM metrics WHERE source_file_id = ?", (file_id,)
+        )
+        deleted = cur.rowcount
+        conn.execute(
+            "UPDATE uploaded_files SET status = ? WHERE id = ?",
+            (STATUS_SUPERSEDED, file_id),
+        )
+        conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+@_retry
+def get_upload_history(db_path: str | None = None) -> list[dict]:
+    """Every uploaded_files row (active/superseded/rejected), newest first."""
+    conn = _get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM uploaded_files ORDER BY uploaded_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_retry
+def delete_uploaded_file_row(file_id: int, db_path: str | None = None) -> int:
+    """Delete a single uploaded_files row by id and its linked metrics.
+
+    Used to clear a rejected entry (no metrics linked) so an improved
+    parser can retry the same file. Also unlinks any metrics that pointed
+    at it, for safety.
+    """
+    conn = _get_connection(db_path)
+    try:
+        conn.execute(
+            "DELETE FROM metrics WHERE source_file_id = ?", (file_id,)
+        )
+        cur = conn.execute(
+            "DELETE FROM uploaded_files WHERE id = ?", (file_id,)
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 @_retry
@@ -181,11 +439,19 @@ def check_source_exists(source: str, db_path: str | None = None) -> bool:
 
 @_retry
 def delete_by_source(source: str, db_path: str | None = None) -> int:
+    """Hard-delete every metric row for a source.
+
+    Also clears that source's rejected_records and removes its uploaded_files
+    entries so the file can be re-uploaded cleanly (no orphan 'active' row
+    left behind to trip the Layer-2 report-identity check).
+    """
     conn = _get_connection(db_path)
     try:
         cur = conn.execute("DELETE FROM metrics WHERE source = ?", (source,))
-        # Also clear any prior rejections from this source so re-import is clean.
         conn.execute("DELETE FROM rejected_records WHERE source = ?", (source,))
+        conn.execute(
+            "DELETE FROM uploaded_files WHERE original_filename = ?", (source,)
+        )
         conn.commit()
         return cur.rowcount
     finally:
