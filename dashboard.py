@@ -43,7 +43,7 @@ from database import (
 )
 from pdf_export import PdfExportError, render_market_snapshot, snapshot_filename
 from pdf_parser import get_warnings, parse_pdf
-from utils import format_display_name
+from utils import build_csv_export, format_display_name
 
 # ---------------------------------------------------------------------------
 # App config
@@ -275,6 +275,21 @@ def _warn_suffix(confidence: float | None) -> str:
     if confidence is not None and confidence < LOW_CONFIDENCE_THRESHOLD:
         return " \u26a0\ufe0f"
     return ""
+
+
+# ---------------------------------------------------------------------------
+# CSV export (shared by Trends, Comparison, Raw Data)
+# ---------------------------------------------------------------------------
+
+def _csv_download_button(df: pd.DataFrame, page: str, filter_bits: list,
+                         *, include_confidence: bool = False, key: str):
+    """Render a Download CSV button for the already-filtered `df`."""
+    fname, csv_text = build_csv_export(
+        df, page, filter_bits, include_confidence=include_confidence
+    )
+    st.download_button(
+        "Download CSV", csv_text, fname, "text/csv", key=key,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1436,11 @@ def page_trends():
         show = show.sort_values(["Submarket", "Period"])
         st.dataframe(show, use_container_width=True, hide_index=True)
 
+    _csv_download_button(
+        filtered, "trends", [sel_market, sel_metric, sel_sub],
+        key="csv_trends",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Page: Comparison
@@ -1525,6 +1545,15 @@ def page_comparison():
 
     st.table(pd.DataFrame(comp_rows))
 
+    # Export the underlying records for the two selected submarkets (the
+    # rows behind the table, not the formatted pivot).
+    cmp_records = list(m1.values()) + list(m2.values())
+    if cmp_records:
+        _csv_download_button(
+            pd.DataFrame(cmp_records), "comparison", [sub1, sub2],
+            key="csv_comparison",
+        )
+
     # Check if any values have low confidence
     all_rows = list(m1.values()) + list(m2.values())
     has_warnings = any(
@@ -1622,20 +1651,12 @@ def page_raw_data():
         },
     )
 
-    # CSV export — keep raw `source` AND include `display_name` for spreadsheets
-    export_df = filtered.copy()
-    if "display_name" in export_df.columns and "source" in export_df.columns:
-        cols = list(export_df.columns)
-        cols.remove("display_name")
-        src_idx = cols.index("source")
-        cols.insert(src_idx + 1, "display_name")
-        export_df = export_df[cols]
-    csv = export_df.to_csv(index=False)
-    st.download_button(
-        "Export CSV",
-        csv,
-        "sebco_market_data.csv",
-        "text/csv",
+    # CSV export — Raw Data is the only page that includes confidence.
+    _csv_download_button(
+        filtered, "raw_data",
+        [sel_market, sel_period, sel_source, search_text],
+        include_confidence=True,
+        key="csv_raw_data",
     )
 
     # Manual editing
