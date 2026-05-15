@@ -1202,8 +1202,23 @@ def page_trends():
         sel_metric = st.selectbox("Metric", metric_types, key="trend_metric",
                                   help=metric_help)
 
-    subs = df[(df["market"] == sel_market) & (df["metric_type"] == sel_metric)]["submarket"]
-    sub_options = ["(all)"] + sorted(subs.dropna().unique().tolist())
+    base = df[(df["market"] == sel_market) & (df["metric_type"] == sel_metric)]
+    # Point count per submarket, deduplicated per period so it matches the
+    # chart's series count (the "n=" shown in the legend).
+    sub_counts = (
+        base.dropna(subset=["submarket"])
+            .drop_duplicates(subset=["submarket", "metric_period"])
+            .groupby("submarket")
+            .size()
+            .to_dict()
+    )
+    sub_options = ["(all)"] + sorted(sub_counts.keys())
+
+    def _sub_label(name):
+        if name == "(all)":
+            return "(all)"
+        c = sub_counts.get(name, 0)
+        return f"{name} ({c} pt{'s' if c != 1 else ''})"
 
     if search["submarket"] and search["submarket"] in sub_options:
         st.session_state["trend_sub"] = search["submarket"]
@@ -1212,6 +1227,7 @@ def page_trends():
 
     with col3:
         sel_sub = st.selectbox("Submarket", sub_options, key="trend_sub",
+                               format_func=_sub_label,
                                help=FILTER_HELP["submarket"])
 
     # Filter data
@@ -1219,17 +1235,37 @@ def page_trends():
     if sel_sub != "(all)":
         filtered = filtered[filtered["submarket"] == sel_sub]
 
-    if filtered.empty:
-        st.info("No data for this selection.")
-        return
-
-    # Deduplicate: keep one value per (submarket, metric_period)
+    # Deduplicate first so the data-point count matches what the chart plots
+    # (one value per submarket per period).
     filtered = filtered.sort_values("confidence", ascending=False).drop_duplicates(
         subset=["submarket", "metric_period"], keep="first"
-    )
+    ).copy()
+
+    # Empty-state guard: a single lonely dot on a stretched axis is worse
+    # than a clear message. Need >= 2 points to show a meaningful trend.
+    n_points = len(filtered)
+    sub_label = "all submarkets" if sel_sub == "(all)" else sel_sub
+    metric_label = sel_metric.replace("_", " ")
+    if n_points == 0:
+        st.info(
+            f"No data found for {sub_label} on {metric_label} in "
+            f"{sel_market}. Try selecting '(all)' submarkets or a "
+            f"different metric."
+        )
+        return
+    if n_points == 1:
+        only_date = pd.to_datetime(
+            filtered["metric_period"].iloc[0]
+        ).strftime("%b %Y")
+        st.info(
+            f"Only 1 data point for {sub_label} on {metric_label} in "
+            f"{sel_market} ({only_date}). Need at least 2 quarters to "
+            f"show a trend. Try selecting '(all)' submarkets, choosing a "
+            f"different metric, or uploading additional historical reports."
+        )
+        return
 
     # Create label for chart
-    filtered = filtered.copy()
     filtered["label"] = filtered["submarket"].fillna("Market-wide")
 
     # Build chart with per-series control
