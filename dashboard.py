@@ -41,6 +41,7 @@ from database import (
     supersede_file,
     update_metric,
 )
+from pdf_export import PdfExportError, render_market_snapshot, snapshot_filename
 from pdf_parser import get_warnings, parse_pdf
 from utils import format_display_name
 
@@ -1065,6 +1066,74 @@ def _render_upload_detail(source: str):
 # Page: Summary
 # ---------------------------------------------------------------------------
 
+def _render_pdf_export(current: pd.DataFrame):
+    """Market+asset+quarter picker and one-page PDF snapshot download.
+
+    Generation runs on an explicit button (the WeasyPrint backend probe and
+    render aren't free), and the bytes are cached in session state keyed by
+    the selection so Streamlit reruns don't regenerate on every interaction.
+    """
+    with st.expander("Export PDF snapshot", expanded=False):
+        combos = (
+            current[["market", "asset_class", "quarter"]]
+            .dropna(subset=["market", "asset_class", "quarter"])
+            .drop_duplicates()
+        )
+        if combos.empty:
+            st.caption("No current-period reports available to export.")
+            return
+
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+        with c1:
+            markets = sorted(combos["market"].unique())
+            sel_market = st.selectbox("Market", markets, key="pdf_market")
+        with c2:
+            assets = sorted(
+                combos[combos["market"] == sel_market]["asset_class"].unique()
+            )
+            sel_asset = st.selectbox(
+                "Asset class", assets, key="pdf_asset",
+                format_func=lambda a: a.title(),
+            )
+        with c3:
+            quarters = sorted(combos[
+                (combos["market"] == sel_market)
+                & (combos["asset_class"] == sel_asset)
+            ]["quarter"].unique())
+            sel_quarter = st.selectbox("Quarter", quarters, key="pdf_quarter")
+
+        sel_key = (sel_market, sel_asset, sel_quarter)
+        fname = snapshot_filename(sel_market, sel_asset, sel_quarter)
+
+        with c4:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("Generate snapshot", type="primary",
+                         key="pdf_generate"):
+                try:
+                    with st.spinner("Building PDF…"):
+                        pdf_bytes = render_market_snapshot(
+                            sel_market, sel_asset, sel_quarter, get_db_path()
+                        )
+                    st.session_state["_pdf_cache"] = (sel_key, pdf_bytes)
+                except PdfExportError as e:
+                    st.session_state.pop("_pdf_cache", None)
+                    st.error(str(e))
+                except Exception as e:  # noqa: BLE001 - surface, don't crash app
+                    st.session_state.pop("_pdf_cache", None)
+                    st.error(f"Could not generate PDF: {e}")
+
+        cached = st.session_state.get("_pdf_cache")
+        if cached and cached[0] == sel_key:
+            st.download_button(
+                "Download PDF snapshot",
+                data=cached[1],
+                file_name=fname,
+                mime="application/pdf",
+                key="pdf_download",
+            )
+            st.caption(f"Ready: `{fname}`")
+
+
 def page_summary():
     st.header("Market Summary")
     st.markdown("Latest extracted values per market and submarket.")
@@ -1085,6 +1154,8 @@ def page_summary():
         return
 
     # For each market/submarket/metric, keep the most recent metric_period
+    _render_pdf_export(current)
+
     current["metric_period"] = pd.to_datetime(current["metric_period"])
     idx = current.groupby(["market", "submarket", "metric_type"])["metric_period"].idxmax()
     latest = current.loc[idx].copy()
