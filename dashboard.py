@@ -293,6 +293,64 @@ def _csv_download_button(df: pd.DataFrame, page: str, filter_bits: list,
 
 
 # ---------------------------------------------------------------------------
+# Date range filter (shared by Trends, Comparison) — the OUTERMOST filter
+# ---------------------------------------------------------------------------
+
+DATE_RANGE_OPTIONS = [
+    "All time", "Last 4 quarters", "Last 8 quarters",
+    "Last 2 years", "Custom range",
+]
+
+_REL_OFFSETS = {
+    "Last 4 quarters": pd.DateOffset(months=12),
+    "Last 8 quarters": pd.DateOffset(months=24),
+    "Last 2 years": pd.DateOffset(years=2),
+}
+
+
+def _date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """Render the date-range picker and return `df` narrowed by
+    metric_period. Applied before any market/metric/submarket narrowing.
+
+    Relative ranges anchor to the most recent data point (not today) so
+    they stay useful with sparse historical data.
+    """
+    st.markdown("**Date range**")
+    choice = st.selectbox(
+        "Date range", DATE_RANGE_OPTIONS, index=0,
+        key=f"{key_prefix}_daterange", label_visibility="collapsed",
+        help="Applied before market / metric / submarket filters.",
+    )
+    if df.empty or choice == "All time":
+        return df
+
+    anchor = df["metric_period"].max()
+    if pd.isna(anchor):
+        return df
+
+    if choice == "Custom range":
+        data_min = df["metric_period"].min().date()
+        data_max = anchor.date()
+        c1, c2 = st.columns(2)
+        with c1:
+            start = st.date_input("Start date", value=data_min,
+                                   key=f"{key_prefix}_dr_start")
+        with c2:
+            end = st.date_input("End date", value=data_max,
+                                 key=f"{key_prefix}_dr_end")
+        if start > end:
+            st.error("Start date must be on or before the end date.")
+            st.stop()
+        lo = pd.Timestamp(start)
+        hi = pd.Timestamp(end) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+    else:
+        lo = anchor - _REL_OFFSETS[choice]
+        hi = anchor
+
+    return df[(df["metric_period"] >= lo) & (df["metric_period"] <= hi)]
+
+
+# ---------------------------------------------------------------------------
 # Smart search
 # ---------------------------------------------------------------------------
 
@@ -1253,6 +1311,15 @@ def page_trends():
     df = df[df["period_type"].isin(["current", "prior_quarter", "prior_year", "historical"])]
     df["metric_period"] = pd.to_datetime(df["metric_period"])
 
+    # Outermost filter — narrow by date before anything else.
+    df = _date_range_filter(df, "trend")
+    if df.empty:
+        st.info(
+            "No data in the selected date range. Widen the range or pick "
+            "'All time'."
+        )
+        return
+
     # Consume search filters
     search = _consume_search_filters()
 
@@ -1457,6 +1524,15 @@ def page_comparison():
     df = pd.DataFrame(rows)
     df = df[df["period_type"] == "current"]
     df["metric_period"] = pd.to_datetime(df["metric_period"])
+
+    # Outermost filter — narrow by date before anything else.
+    df = _date_range_filter(df, "cmp")
+    if df.empty:
+        st.info(
+            "No data in the selected date range. Widen the range or pick "
+            "'All time'."
+        )
+        return
 
     _consume_search_filters()
 
