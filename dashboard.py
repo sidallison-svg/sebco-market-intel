@@ -12,10 +12,11 @@ Pages:
 import getpass
 import hashlib
 import io
+import json
 import os
 import re
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -32,12 +33,15 @@ from database import (
     get_distinct_values,
     get_file_by_hash,
     get_metrics_for_source,
+    delete_saved_view,
     get_rejected_records,
+    get_saved_views,
     get_upload_history,
     get_upload_summaries,
     init_db,
     insert_metrics,
     record_uploaded_file,
+    save_view,
     supersede_file,
     update_metric,
 )
@@ -348,6 +352,114 @@ def _date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
         hi = anchor
 
     return df[(df["metric_period"] >= lo) & (df["metric_period"] <= hi)]
+
+
+# ---------------------------------------------------------------------------
+# Saved views (named filter combinations for Trends / Comparison)
+# ---------------------------------------------------------------------------
+
+# Widget keys whose values make up a saved view, per page. Order matters
+# only for readability. Date-input keys end in _dr_start / _dr_end.
+SAVED_VIEW_KEYS = {
+    "Trends": ["trend_daterange", "trend_dr_start", "trend_dr_end",
+               "trend_market", "trend_metric", "trend_sub"],
+    "Comparison": ["cmp_daterange", "cmp_dr_start", "cmp_dr_end",
+                   "cmp_sub_a", "cmp_sub_b"],
+}
+
+
+def _capture_view_filters(page: str) -> dict:
+    """Snapshot the current filter widget values from session state.
+
+    Read at Save time from the previous run's persisted widget state
+    (the filter widgets render below this UI, so their values survive
+    in session_state by key)."""
+    out = {}
+    for k in SAVED_VIEW_KEYS.get(page, []):
+        if k in st.session_state and st.session_state[k] is not None:
+            v = st.session_state[k]
+            if isinstance(v, (date, datetime)):
+                v = v.isoformat()
+            out[k] = v
+    return out
+
+
+def _take_pending_view(page: str) -> dict:
+    """Pop a just-loaded view for this page. Immediately applies the
+    always-safe keys (fixed-option date range + free-form date inputs)
+    to session state; option-dependent keys (market/metric/submarket)
+    are returned for guarded injection where their options are known."""
+    pv = st.session_state.get("_pending_view")
+    if not pv or pv.get("_page") != page:
+        return {}
+    st.session_state.pop("_pending_view", None)
+    filters = pv.get("filters", {}) or {}
+    for k, v in filters.items():
+        if k.endswith("_daterange") and v in DATE_RANGE_OPTIONS:
+            st.session_state[k] = v
+        elif k.endswith("_dr_start") or k.endswith("_dr_end"):
+            try:
+                st.session_state[k] = date.fromisoformat(v)
+            except (TypeError, ValueError):
+                pass
+    return filters
+
+
+def _inject_pending(filters: dict, key: str, valid_options) -> None:
+    """Set a session_state filter value only if it's still a valid
+    option, so a stale saved view never crashes the widget."""
+    if filters.get(key) in (valid_options or []):
+        st.session_state[key] = filters[key]
+
+
+def _render_saved_views(page: str) -> None:
+    """Load / save / delete named filter combinations for a page."""
+    with st.expander("Saved views"):
+        views = get_saved_views(page)
+        names = [v["name"] for v in views]
+
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            sel = st.selectbox(
+                "Load saved view…", ["—"] + names,
+                key=f"{page}_loadview",
+                help="Restore a previously saved filter combination.",
+            )
+        with c2:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("Load", key=f"{page}_loadbtn",
+                         disabled=(sel == "—")):
+                v = next(x for x in views if x["name"] == sel)
+                st.session_state["_pending_view"] = {
+                    "_page": page,
+                    "filters": json.loads(v["filter_json"]),
+                }
+                st.rerun()
+
+        st.markdown("---")
+        c3, c4 = st.columns([4, 1])
+        with c3:
+            new_name = st.text_input(
+                "Save current filters as", key=f"{page}_savename",
+                placeholder="e.g., Boise quarterly",
+            )
+        with c4:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("Save current view", key=f"{page}_savebtn",
+                         disabled=not new_name.strip()):
+                save_view(new_name.strip(), page,
+                          json.dumps(_capture_view_filters(page)))
+                st.success(f"Saved view '{new_name.strip()}'.")
+                st.rerun()
+
+        if views:
+            st.markdown("**Manage saved views**")
+            for v in views:
+                m1, m2 = st.columns([5, 1])
+                m1.write(v["name"])
+                if m2.button("Delete", key=f"{page}_del_{v['id']}"):
+                    delete_saved_view(v["id"])
+                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1423,11 @@ def page_trends():
     df = df[df["period_type"].isin(["current", "prior_quarter", "prior_year", "historical"])]
     df["metric_period"] = pd.to_datetime(df["metric_period"])
 
+    # Saved views: apply a just-loaded view's safe keys, then render the
+    # load/save UI above the filters.
+    pending_view = _take_pending_view("Trends")
+    _render_saved_views("Trends")
+
     # Outermost filter — narrow by date before anything else.
     df = _date_range_filter(df, "trend")
     if df.empty:
@@ -1331,6 +1448,7 @@ def page_trends():
     # Apply search market before widget renders
     if search["market"] and search["market"] in markets:
         st.session_state["trend_market"] = search["market"]
+    _inject_pending(pending_view, "trend_market", markets)
 
     with col1:
         sel_market = st.selectbox("Market", markets, key="trend_market",
@@ -1343,6 +1461,7 @@ def page_trends():
         st.session_state["trend_metric"] = search["metric"]
     elif "trend_metric" in st.session_state and st.session_state["trend_metric"] not in metric_types:
         del st.session_state["trend_metric"]
+    _inject_pending(pending_view, "trend_metric", metric_types)
 
     # Build metric help text showing selected metric's definition
     current_metric = st.session_state.get("trend_metric", metric_types[0] if metric_types else "")
@@ -1377,6 +1496,7 @@ def page_trends():
         st.session_state["trend_sub"] = search["submarket"]
     elif "trend_sub" in st.session_state and st.session_state["trend_sub"] not in sub_options:
         del st.session_state["trend_sub"]
+    _inject_pending(pending_view, "trend_sub", sub_options)
 
     with col3:
         sel_sub = st.selectbox("Submarket", sub_options, key="trend_sub",
@@ -1525,6 +1645,11 @@ def page_comparison():
     df = df[df["period_type"] == "current"]
     df["metric_period"] = pd.to_datetime(df["metric_period"])
 
+    # Saved views: apply a just-loaded view's safe keys, then render the
+    # load/save UI above the filters.
+    pending_view = _take_pending_view("Comparison")
+    _render_saved_views("Comparison")
+
     # Outermost filter — narrow by date before anything else.
     df = _date_range_filter(df, "cmp")
     if df.empty:
@@ -1555,14 +1680,17 @@ def page_comparison():
         c = sub_counts.get(name, 0)
         return f"{name} ({c} pt{'s' if c != 1 else ''})"
 
+    _inject_pending(pending_view, "cmp_sub_a", subs)
+    _inject_pending(pending_view, "cmp_sub_b", subs)
+
     col1, col2 = st.columns(2)
     with col1:
         sub1 = st.selectbox("Submarket A", subs, index=0,
-                            format_func=_cmp_label,
+                            format_func=_cmp_label, key="cmp_sub_a",
                             help="First submarket to compare.")
     with col2:
         sub2 = st.selectbox("Submarket B", subs, index=min(1, len(subs) - 1),
-                            format_func=_cmp_label,
+                            format_func=_cmp_label, key="cmp_sub_b",
                             help="Second submarket to compare.")
 
     if sub1 == sub2:

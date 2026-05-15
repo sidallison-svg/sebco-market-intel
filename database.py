@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS uploaded_files (
 CREATE INDEX IF NOT EXISTS idx_uploaded_hash ON uploaded_files(file_hash);
 CREATE INDEX IF NOT EXISTS idx_uploaded_identity
     ON uploaded_files(market, asset_class, report_date, quarter, status);
+
+CREATE TABLE IF NOT EXISTS saved_views (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    page        TEXT NOT NULL,
+    filter_json TEXT NOT NULL,
+    created_by  TEXT,
+    created_at  TEXT NOT NULL,
+    UNIQUE(page, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_views_page ON saved_views(page);
 """
 
 # Statuses for uploaded_files.status
@@ -571,6 +583,63 @@ def delete_rejected_record(rejected_id: int, db_path: str | None = None) -> int:
     try:
         cur = conn.execute(
             "DELETE FROM rejected_records WHERE id = ?", (rejected_id,)
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Saved views (named filter combinations for Trends / Comparison)
+# ---------------------------------------------------------------------------
+
+@_retry
+def save_view(name: str, page: str, filter_json: str,
+              db_path: str | None = None) -> int:
+    """Insert or replace a saved view. (page, name) is unique, so saving
+    again under the same name on the same page overwrites it."""
+    conn = _get_connection(db_path)
+    now = datetime.now().isoformat()
+    user = getpass.getuser()
+    try:
+        cur = conn.execute(
+            """INSERT INTO saved_views (name, page, filter_json,
+                   created_by, created_at)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(page, name) DO UPDATE SET
+                   filter_json = excluded.filter_json,
+                   created_by  = excluded.created_by,
+                   created_at  = excluded.created_at""",
+            (name, page, filter_json, user, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+@_retry
+def get_saved_views(page: str, db_path: str | None = None) -> list[dict]:
+    """All saved views for a page, newest first."""
+    conn = _get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM saved_views WHERE page = ? "
+            "ORDER BY created_at DESC",
+            (page,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@_retry
+def delete_saved_view(view_id: int, db_path: str | None = None) -> int:
+    conn = _get_connection(db_path)
+    try:
+        cur = conn.execute(
+            "DELETE FROM saved_views WHERE id = ?", (view_id,)
         )
         conn.commit()
         return cur.rowcount
