@@ -1380,12 +1380,22 @@ def page_comparison():
         st.info("Need at least 2 submarkets for comparison. Upload more data.")
         return
 
+    # Point count per submarket (distinct metrics available this period), so
+    # the user can see how much data backs each option before selecting.
+    sub_counts = df.groupby("full_sub")["metric_type"].nunique().to_dict()
+
+    def _cmp_label(name):
+        c = sub_counts.get(name, 0)
+        return f"{name} ({c} pt{'s' if c != 1 else ''})"
+
     col1, col2 = st.columns(2)
     with col1:
         sub1 = st.selectbox("Submarket A", subs, index=0,
+                            format_func=_cmp_label,
                             help="First submarket to compare.")
     with col2:
         sub2 = st.selectbox("Submarket B", subs, index=min(1, len(subs) - 1),
+                            format_func=_cmp_label,
                             help="Second submarket to compare.")
 
     if sub1 == sub2:
@@ -1394,6 +1404,17 @@ def page_comparison():
 
     d1 = df[df["full_sub"] == sub1]
     d2 = df[df["full_sub"] == sub2]
+
+    # Empty-state guard: if a date/period filter narrows either selection to
+    # nothing, a clear message beats a table full of em-dashes.
+    empty = [s for s, d in ((sub1, d1), (sub2, d2)) if d.empty]
+    if empty:
+        st.info(
+            f"No data found for {' and '.join(empty)} in this period. "
+            f"Try a different submarket, widen the date range, or upload "
+            f"additional reports."
+        )
+        return
 
     # Get latest values per metric
     def latest_metrics(d):
