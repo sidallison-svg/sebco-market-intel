@@ -1,0 +1,38 @@
+{
+  "Kent Valley": {
+    "building_count": 12,
+    "total_sf": 280000,
+    "sebco_asking_rent": 0.99,
+    "lease_type": "NNN"
+  },
+  "Marysville": {
+    "building_count": 5,
+    "total_sf": 93000,
+    "sebco_asking_rent": 0.94,
+    "lease_type": "NNN"
+  },
+  "San Diego": {
+    "building_count": 5,
+    "total_sf": 225000,
+    "sebco_asking_rent": 1.36,
+    "lease_type": "NNN"
+  },
+  "LA Mid-Counties": {
+    "building_count": 2,
+    "total_sf": 32000,
+    "sebco_asking_rent": 2.16,
+    "lease_type": "NNN"
+  },
+  "LA South Bay": {
+    "building_count": 2,
+    "total_sf": 63000,
+    "sebco_asking_rent": 0.91,
+    "lease_type": "NNN"
+  },
+  "Orange County": {
+    "building_count": 4,
+    "total_sf": 152000,
+    "sebco_asking_rent": 1.45,
+    "lease_type": "NNN"
+  }
+}

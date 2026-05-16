@@ -47,7 +47,13 @@ from database import (
 )
 from pdf_export import PdfExportError, render_market_snapshot, snapshot_filename
 from pdf_parser import get_warnings, parse_pdf
-from utils import build_csv_export, format_display_name
+from utils import (
+    SEBCO_PORTFOLIO_ORDER,
+    build_csv_export,
+    format_display_name,
+    load_sebco_portfolio,
+    save_sebco_portfolio,
+)
 
 # ---------------------------------------------------------------------------
 # App config
@@ -658,7 +664,8 @@ st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Upload", "Uploads", "Summary", "Trends", "Comparison", "Raw Data"],
+    ["Upload", "Uploads", "Summary", "Trends", "Comparison", "Raw Data",
+     "Portfolio"],
     key="nav_page",
 )
 
@@ -2036,6 +2043,83 @@ def page_raw_data():
 
 
 # ---------------------------------------------------------------------------
+# Page: Portfolio (Sebco internal holdings — editable config)
+# ---------------------------------------------------------------------------
+
+_PORTFOLIO_LEASE_TYPES = ["NNN", "industrial_gross"]
+
+
+def page_portfolio():
+    st.header("Sebco Portfolio")
+    st.markdown(
+        "Internal holdings used by the **Market Overview** report. Edit the "
+        "values below and save — they are written back to "
+        "`sebco_portfolio.json`."
+    )
+
+    portfolio = load_sebco_portfolio()
+    if not portfolio:
+        st.warning(
+            "No portfolio config found (or it could not be read). A fresh "
+            "`sebco_portfolio.json` will be created when you save."
+        )
+
+    # Stable row order: known order first, then any extra keys.
+    names = [n for n in SEBCO_PORTFOLIO_ORDER if n in portfolio]
+    names += [n for n in portfolio if n not in names]
+    if not names:
+        names = list(SEBCO_PORTFOLIO_ORDER)
+
+    with st.form("portfolio_form"):
+        edited: dict = {}
+        for name in names:
+            rec = portfolio.get(name, {})
+            st.subheader(name)
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                bc = st.number_input(
+                    "Buildings", min_value=0, step=1,
+                    value=int(rec.get("building_count", 0) or 0),
+                    key=f"pf_bc_{name}",
+                )
+            with c2:
+                sf = st.number_input(
+                    "Total SF", min_value=0, step=1000,
+                    value=int(rec.get("total_sf", 0) or 0),
+                    key=f"pf_sf_{name}",
+                )
+            with c3:
+                rent = st.number_input(
+                    "Sebco asking rent ($/SF/mo)", min_value=0.0, step=0.01,
+                    format="%.2f",
+                    value=float(rec.get("sebco_asking_rent", 0.0) or 0.0),
+                    key=f"pf_rent_{name}",
+                )
+            with c4:
+                lt_default = rec.get("lease_type", "NNN")
+                lt = st.selectbox(
+                    "Lease type", _PORTFOLIO_LEASE_TYPES,
+                    index=(_PORTFOLIO_LEASE_TYPES.index(lt_default)
+                           if lt_default in _PORTFOLIO_LEASE_TYPES else 0),
+                    key=f"pf_lt_{name}",
+                )
+            edited[name] = {
+                "building_count": int(bc),
+                "total_sf": int(sf),
+                "sebco_asking_rent": round(float(rent), 2),
+                "lease_type": lt,
+            }
+            st.markdown("---")
+
+        if st.form_submit_button("Save portfolio", type="primary"):
+            try:
+                save_sebco_portfolio(edited)
+                st.success("Portfolio saved to sebco_portfolio.json.")
+            except OSError as e:
+                st.error(f"Could not save portfolio: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -2051,3 +2135,5 @@ elif page == "Comparison":
     page_comparison()
 elif page == "Raw Data":
     page_raw_data()
+elif page == "Portfolio":
+    page_portfolio()

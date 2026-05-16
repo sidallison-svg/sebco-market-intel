@@ -2,11 +2,43 @@
 Shared utilities for Sebco Market Intel.
 """
 
+import json
 import os
 import re
 from datetime import datetime
 
 import pandas as pd
+
+_PORTFOLIO_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "sebco_portfolio.json"
+)
+
+# Canonical display order for the portfolio / Market Overview report.
+SEBCO_PORTFOLIO_ORDER = [
+    "Kent Valley", "Marysville", "San Diego",
+    "LA Mid-Counties", "LA South Bay", "Orange County",
+]
+
+
+def load_sebco_portfolio() -> dict:
+    """Return the Sebco internal portfolio dict.
+
+    Returns {} (never raises) if the config file is missing or unreadable
+    so the dashboard degrades gracefully instead of crashing.
+    """
+    try:
+        with open(_PORTFOLIO_FILE, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_sebco_portfolio(data: dict) -> None:
+    """Persist the portfolio dict back to sebco_portfolio.json."""
+    with open(_PORTFOLIO_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
 
 # Spec column set for CSV exports. Internal IDs, source_file_id and raw_text
 # are deliberately excluded; confidence is appended for Raw Data only.
