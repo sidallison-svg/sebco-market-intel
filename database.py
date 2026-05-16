@@ -336,20 +336,26 @@ def get_file_by_hash(file_hash: str, db_path: str | None = None) -> dict | None:
 
 @_retry
 def find_active_report(market: str, asset_class: str, report_date: str,
-                       quarter: str, db_path: str | None = None) -> dict | None:
+                       quarter: str, source: str,
+                       db_path: str | None = None) -> dict | None:
     """Layer 2 — same report identity, possibly a different file.
 
-    Returns the existing ACTIVE uploaded_files row for this
-    (market, asset_class, report_date, quarter) tuple, or None.
+    Identity is (market, asset_class, report_date, quarter, source).
+    `source` (the original PDF filename) is part of the tuple so that
+    multi-source data for the same market/quarter — e.g. a Voit and a
+    Kidder report both covering Orange County 1Q26 — coexists instead
+    of one being treated as a replacement of the other. Returns the
+    existing ACTIVE uploaded_files row for this tuple, or None.
     """
     conn = _get_connection(db_path)
     try:
         row = conn.execute(
             """SELECT * FROM uploaded_files
                WHERE market = ? AND asset_class = ? AND report_date = ?
-                 AND quarter = ? AND status = ?
+                 AND quarter = ? AND original_filename = ? AND status = ?
                ORDER BY uploaded_at DESC LIMIT 1""",
-            (market, asset_class, report_date, quarter, STATUS_ACTIVE),
+            (market, asset_class, report_date, quarter, source,
+             STATUS_ACTIVE),
         ).fetchone()
         return dict(row) if row else None
     finally:

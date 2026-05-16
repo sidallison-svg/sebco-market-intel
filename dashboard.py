@@ -713,6 +713,7 @@ def _report_identity(records: list[dict]) -> dict:
         "asset_class": r0.get("asset_class"),
         "report_date": r0.get("report_date"),
         "quarter": r0.get("quarter"),
+        "source": r0.get("source"),
     }
 
 
@@ -855,12 +856,13 @@ def page_upload():
         conflict = find_active_report(
             identity["market"], identity["asset_class"],
             identity["report_date"], identity["quarter"],
+            identity["source"],
         )
 
         if conflict:
             strat_changed = (conflict.get("parser_strategy") or "") != strategies
             st.warning(
-                f"**A report for "
+                f"**A {format_display_name(identity['source'])} report for "
                 f"{identity['market']} "
                 f"{(identity['asset_class'] or '').title()} "
                 f"{identity['quarter']} is already loaded.**\n\n"
