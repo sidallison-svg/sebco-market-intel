@@ -727,12 +727,13 @@ def _fmt_dt(iso: str | None) -> str:
 
 
 def page_upload():
-    st.header("Upload Kidder Mathews Reports")
+    st.header("Upload Market Reports")
     st.markdown(
-        "Upload one or more Kidder Mathews quarterly market report PDFs. "
-        "Duplicate detection runs automatically: identical files are blocked, "
-        "and a different file for an already-loaded report prompts you to "
-        "replace or cancel."
+        "Upload quarterly industrial market reports. Supports Kidder "
+        "Mathews, CBRE, and Voit Real Estate Services. Duplicate detection "
+        "runs automatically: identical files are blocked, and a different "
+        "report covering the same market and quarter prompts you to replace "
+        "or cancel."
     )
 
     uploaded_files = st.file_uploader(
@@ -814,9 +815,11 @@ def page_upload():
             })
             st.session_state.pop(cache_key, None)
             st.error(
-                "Could not extract any data — this may not be a supported "
-                "Kidder Mathews format. The file hash has been recorded and "
-                "marked **rejected** so you don't keep retrying it."
+                "Could not extract any data — this format is not yet "
+                "supported. Currently supported: Kidder Mathews, CBRE "
+                "Figures, and Voit Real Estate Services. The file hash has "
+                "been recorded and marked **rejected** so you don't keep "
+                "retrying it."
             )
             continue
 
