@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import get_db_path
 from database import (
@@ -45,7 +46,14 @@ from database import (
     supersede_file,
     update_metric,
 )
-from pdf_export import PdfExportError, render_market_snapshot, snapshot_filename
+from pdf_export import (
+    PdfExportError,
+    market_overview_filename,
+    render_market_overview,
+    render_market_overview_html,
+    render_market_snapshot,
+    snapshot_filename,
+)
 from pdf_parser import get_warnings, parse_pdf
 from utils import (
     SEBCO_PORTFOLIO_ORDER,
@@ -664,8 +672,8 @@ st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Upload", "Uploads", "Summary", "Trends", "Comparison", "Raw Data",
-     "Portfolio"],
+    ["Upload", "Uploads", "Summary", "Market Overview", "Trends",
+     "Comparison", "Raw Data", "Portfolio"],
     key="nav_page",
 )
 
@@ -2043,6 +2051,53 @@ def page_raw_data():
 
 
 # ---------------------------------------------------------------------------
+# Page: Market Overview (one-page report — live preview + PDF export)
+# ---------------------------------------------------------------------------
+
+def page_market_overview():
+    st.header("Market Overview")
+    st.markdown(
+        "One-page Sebco portfolio vs. market dashboard. Rows come from "
+        "`sebco_portfolio.json`; market figures are pulled live from the "
+        "database. Cells with no data show **—** (no values are fabricated)."
+    )
+
+    db_path = get_db_path()
+    try:
+        html = render_market_overview_html(db_path)
+    except Exception as e:  # noqa: BLE001 - surface, don't crash the app
+        st.error(f"Could not build the Market Overview preview: {e}")
+        return
+
+    components.html(html, height=620, scrolling=True)
+
+    st.markdown("---")
+    if st.button("Export PDF", type="primary", key="ov_export"):
+        try:
+            with st.spinner("Building PDF…"):
+                pdf_bytes = render_market_overview(db_path)
+            st.session_state["_ov_pdf"] = pdf_bytes
+        except PdfExportError as e:
+            st.session_state.pop("_ov_pdf", None)
+            st.error(str(e))
+        except Exception as e:  # noqa: BLE001
+            st.session_state.pop("_ov_pdf", None)
+            st.error(f"Could not generate PDF: {e}")
+
+    pdf_bytes = st.session_state.get("_ov_pdf")
+    if pdf_bytes:
+        fname = market_overview_filename()
+        st.download_button(
+            "Download Market Overview PDF",
+            data=pdf_bytes,
+            file_name=fname,
+            mime="application/pdf",
+            key="ov_download",
+        )
+        st.caption(f"Ready: `{fname}`")
+
+
+# ---------------------------------------------------------------------------
 # Page: Portfolio (Sebco internal holdings — editable config)
 # ---------------------------------------------------------------------------
 
@@ -2133,6 +2188,8 @@ elif page == "Trends":
     page_trends()
 elif page == "Comparison":
     page_comparison()
+elif page == "Market Overview":
+    page_market_overview()
 elif page == "Raw Data":
     page_raw_data()
 elif page == "Portfolio":

@@ -314,6 +314,231 @@ def render_market_snapshot(market: str, asset_class: str, quarter: str,
 
 
 # ---------------------------------------------------------------------------
+# Market Overview report (Sebco portfolio vs. market, one landscape page)
+# ---------------------------------------------------------------------------
+
+_ARROW_UP, _ARROW_DOWN, _ARROW_FLAT = "▲", "▼", "●"
+_RED, _GREEN, _GRAY = "#C0392B", "#1E8449", "#9CA3AF"
+
+
+def _ov_lease_label(lease_type) -> str:
+    if lease_type == "NNN":
+        return "NNN"
+    if lease_type == "industrial_gross":
+        return "industrial-gross"
+    return ""
+
+
+def _q_label(quarter: str | None) -> str:
+    """'1Q 2026' -> 'Q1 2026'. Falls back to the raw string."""
+    if not quarter:
+        return ""
+    m = re.match(r"(\d)Q\s*(\d{4})", str(quarter).strip())
+    return f"Q{m.group(1)} {m.group(2)}" if m else str(quarter)
+
+
+def _ov_pick(conn, name: str, metric_type: str, period_type: str):
+    """Best DB row for a portfolio name + metric + period.
+
+    Matches the name against either market or submarket; prefers
+    market-wide rows, then higher confidence, then most recent.
+    """
+    return conn.execute(
+        """
+        SELECT metric_value, unit, lease_type, quarter, metric_period
+        FROM metrics
+        WHERE metric_type = ? AND period_type = ?
+          AND (LOWER(market) = LOWER(?) OR LOWER(submarket) = LOWER(?))
+        ORDER BY (submarket IS NULL) DESC, confidence DESC,
+                 metric_period DESC
+        LIMIT 1
+        """,
+        (metric_type, period_type, name, name),
+    ).fetchone()
+
+
+def _num(row):
+    if row is None or row["metric_value"] is None:
+        return None
+    try:
+        return float(row["metric_value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def _missing():
+    return {"text": EM_DASH, "missing": True, "arrow": "", "color": ""}
+
+
+def _vac_cell(cur, prev) -> dict:
+    v = _num(cur)
+    if v is None:
+        return _missing()
+    p = _num(prev)
+    if p is None:
+        arrow, color = _ARROW_FLAT, _GRAY  # no prior quarter to compare
+    elif abs(v - p) <= 0.1:
+        arrow, color = _ARROW_FLAT, _GRAY
+    elif v > p:
+        arrow, color = _ARROW_UP, _RED     # vacancy up = bad
+    else:
+        arrow, color = _ARROW_DOWN, _GREEN
+    return {"text": f"{v:.1f}%", "arrow": arrow, "color": color,
+            "missing": False}
+
+
+def _rent_cell(cur, prev) -> dict:
+    v = _num(cur)
+    if v is None:
+        return _missing()
+    p = _num(prev)
+    if p is None or abs(v - p) < 0.01:
+        arrow, color = _ARROW_FLAT, _GRAY
+    elif v > p:
+        arrow, color = _ARROW_UP, _GREEN   # rent up = good
+    else:
+        arrow, color = _ARROW_DOWN, _RED
+    ll = _ov_lease_label(cur["lease_type"])
+    text = f"${v:,.2f}" + (f" {ll}" if ll else "")
+    return {"text": text, "arrow": arrow, "color": color, "missing": False}
+
+
+def _sebco_cell(pf: dict) -> dict:
+    r = pf.get("sebco_asking_rent")
+    if r is None:
+        return _missing()
+    try:
+        rv = float(r)
+    except (TypeError, ValueError):
+        return _missing()
+    ll = _ov_lease_label(pf.get("lease_type"))
+    return {"text": f"${rv:,.2f}" + (f" {ll}" if ll else ""),
+            "arrow": "", "color": "", "missing": False}
+
+
+def _abs_cell(cur) -> dict:
+    v = _num(cur)
+    if v is None:
+        return _missing()
+    sign = "+" if v >= 0 else "-"
+    if abs(v) < 1000:
+        arrow, color = _ARROW_FLAT, _GRAY
+    elif v > 0:
+        arrow, color = _ARROW_UP, _GREEN
+    else:
+        arrow, color = _ARROW_DOWN, _RED
+    ql = _q_label(cur["quarter"])
+    text = f"{sign}{abs(v) / 1000:,.0f}k sf" + (f" · {ql}" if ql else "")
+    return {"text": text, "arrow": arrow, "color": color, "missing": False}
+
+
+def _pipe_cell(uc, planned) -> dict:
+    ucv = _num(uc)
+    pv = _num(planned)
+    if ucv is not None and ucv >= 50_000:
+        text = f"{ucv:,.0f} sf U/C"
+    elif pv is not None and pv >= 50_000:
+        text = f"{pv:,.0f} sf Proposed"
+    elif ucv is not None or pv is not None:
+        text = "Limited"
+    else:
+        return _missing()
+    return {"text": text, "arrow": "", "color": "", "missing": False}
+
+
+def _overview_quarter(conn) -> str:
+    """Quarter for the title/footer, derived from the latest current
+    industrial metric; falls back to today's calendar quarter."""
+    row = conn.execute(
+        "SELECT quarter FROM metrics WHERE asset_class = 'industrial' "
+        "AND period_type = 'current' AND metric_period IS NOT NULL "
+        "ORDER BY metric_period DESC LIMIT 1"
+    ).fetchone()
+    if row and row["quarter"]:
+        ql = _q_label(row["quarter"])
+        if ql:
+            return ql
+    now = datetime.now()
+    return f"Q{(now.month - 1) // 3 + 1} {now.year}"
+
+
+def _fetch_overview_data(db_path: str) -> dict:
+    from utils import SEBCO_PORTFOLIO_ORDER, load_sebco_portfolio
+
+    portfolio = load_sebco_portfolio()
+    names = [n for n in SEBCO_PORTFOLIO_ORDER if n in portfolio]
+    for n in portfolio:
+        if n not in names:
+            names.append(n)
+    if not names:
+        names = list(SEBCO_PORTFOLIO_ORDER)
+
+    conn = sqlite3.connect(db_path, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        quarter = _overview_quarter(conn)
+        rows = []
+        for name in names:
+            pf = portfolio.get(name, {})
+            bits = []
+            bc = pf.get("building_count")
+            if bc is not None:
+                bits.append(f"{bc} bldg{'s' if bc != 1 else ''}")
+            tsf = pf.get("total_sf")
+            if tsf:
+                bits.append(f"{tsf / 1000:,.0f}k sf")
+            rows.append({
+                "name": name.upper(),
+                "sub_meta": ("(" + ", ".join(bits) + ")") if bits else "",
+                "vacancy": _vac_cell(
+                    _ov_pick(conn, name, "total_vacancy_rate", "current"),
+                    _ov_pick(conn, name, "total_vacancy_rate",
+                             "prior_quarter"),
+                ),
+                "market_rent": _rent_cell(
+                    _ov_pick(conn, name, "asking_rent", "current"),
+                    _ov_pick(conn, name, "asking_rent", "prior_quarter"),
+                ),
+                "sebco_rent": _sebco_cell(pf),
+                "absorption": _abs_cell(
+                    _ov_pick(conn, name, "net_absorption", "current")
+                ),
+                "pipeline": _pipe_cell(
+                    _ov_pick(conn, name, "under_construction", "current"),
+                    _ov_pick(conn, name, "planned_construction", "current"),
+                ),
+            })
+    finally:
+        conn.close()
+
+    return {
+        "title": f"{quarter.upper()} INDUSTRIAL MARKET DASHBOARD",
+        "footer_quarter": quarter,
+        "current_month_year": datetime.now().strftime("%B %Y"),
+        "rows": rows,
+    }
+
+
+def market_overview_filename() -> str:
+    return f"sebco_market_overview_{datetime.now():%Y-%m-%d}.pdf"
+
+
+def render_market_overview_html(db_path: str) -> str:
+    """The Market Overview as an HTML string (used for the live preview)."""
+    data = _fetch_overview_data(db_path)
+    env = Environment(
+        loader=FileSystemLoader(_TEMPLATE_DIR),
+        autoescape=select_autoescape(["html"]),
+    )
+    return env.get_template("market_overview.html").render(**data)
+
+
+def render_market_overview(db_path: str) -> bytes:
+    """One-page landscape Market Overview PDF (bytes)."""
+    return _html_to_pdf(render_market_overview_html(db_path))
+
+
+# ---------------------------------------------------------------------------
 # Subprocess worker entrypoint
 # ---------------------------------------------------------------------------
 

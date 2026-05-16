@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<style>
+  @page {
+    size: Letter landscape;
+    margin: 0.5in 0.55in;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: "Helvetica", "Arial", sans-serif;
+    color: #1A1A2E;
+    font-size: 10pt;
+  }
+
+  /* Header band */
+  .ov-header {
+    background: #1a2b4a;
+    color: #FFFFFF;
+    padding: 14px 20px;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .ov-header .title {
+    font-size: 18pt;
+    font-weight: bold;
+    letter-spacing: 0.02em;
+    color: #FFFFFF;
+  }
+  .ov-header .brand {
+    font-size: 12pt;
+    font-weight: bold;
+    letter-spacing: 0.18em;
+    color: #FFFFFF;
+    border: 1.5px solid rgba(255, 255, 255, 0.85);
+    padding: 5px 12px;
+    border-radius: 3px;
+  }
+
+  table.ov {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 16px;
+    font-size: 10pt;
+  }
+  table.ov thead th {
+    background: #1a2b4a;
+    color: #FFFFFF;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    text-align: left;
+    padding: 9px 12px;
+  }
+  table.ov thead th.num { text-align: right; }
+  table.ov tbody td {
+    padding: 11px 12px;
+    border-bottom: 1px solid #E5E7EB;
+    vertical-align: top;
+  }
+  table.ov tbody td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.ov tbody tr:nth-child(even) { background: #F7F8FA; }
+  table.ov tbody tr:nth-child(odd) { background: #FFFFFF; }
+
+  .sub-name {
+    font-weight: bold;
+    color: #1a2b4a;
+    font-size: 10.5pt;
+  }
+  .sub-meta {
+    color: #8A8F98;
+    font-size: 7.5pt;
+    margin-top: 2px;
+  }
+  .missing {
+    color: #B0B0B0;
+    font-style: italic;
+  }
+  .arrow { font-weight: bold; }
+
+  .ov-footer {
+    margin-top: 18px;
+    border-top: 1px solid #E5E7EB;
+    padding-top: 8px;
+    font-size: 7.5pt;
+    color: #6B7280;
+  }
+</style>
+</head>
+<body>
+
+  <div class="ov-header">
+    <span class="title">{{ title }}</span>
+    <span class="brand">SEBCO&nbsp;&nbsp;INC</span>
+  </div>
+
+  <table class="ov">
+    <thead>
+      <tr>
+        <th>Submarket</th>
+        <th class="num">Market Vacancy</th>
+        <th class="num">Market $/SF/MO</th>
+        <th class="num">Sebco $/SF/MO</th>
+        <th class="num">Absorption</th>
+        <th class="num">Pipeline</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>
+          <div class="sub-name">{{ r.name }}</div>
+          {% if r.sub_meta %}<div class="sub-meta">{{ r.sub_meta }}</div>{% endif %}
+        </td>
+        {% for cell in [r.vacancy, r.market_rent, r.sebco_rent, r.absorption, r.pipeline] %}
+        <td class="num{% if cell.missing %} missing{% endif %}">
+          {{ cell.text }}{% if cell.arrow %} <span class="arrow" style="color: {{ cell.color }}">{{ cell.arrow }}</span>{% endif %}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="ov-footer">
+    Source: Kidder Mathews, Andover/Corfac, CBRE, Voit {{ footer_quarter }} Reports
+    &bull; Prepared {{ current_month_year }}
+  </div>
+
+</body>
+</html>
