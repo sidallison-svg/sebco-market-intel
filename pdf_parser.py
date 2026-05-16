@@ -1252,100 +1252,305 @@ def _parse_dual_breakdown(page, header: dict, source: str,
 
 
 # ---------------------------------------------------------------------------
+# Provider detection + CBRE / Voit grid-table parsers
+# ---------------------------------------------------------------------------
+#
+# CBRE and Voit publish dense single-period statistics grids rather than the
+# multi-quarter blocks Kidder uses, so they get their own positional parsers.
+#
+# Unit note: the spec calls asking-rent units "usd_per_sf_per_month" and
+# inventory "msf". To stay consistent with the rest of the app (formatting,
+# charts, CSV, snapshot PDF all branch on the existing vocabulary) we store
+# asking_rent as "dollar_per_sf" (already monthly elsewhere) and convert MSF
+# to SF so total_inventory stays unit "sf" like every other source. The
+# $/SF/MO + NNN-vs-gross distinction is carried by metric_type + lease_type.
+
+
+def _detect_provider(pages: list[str]) -> str:
+    """Identify the report publisher from footer/branding text."""
+    joined = "\n".join(pages).upper()
+    if "CBRE RESEARCH" in joined:
+        return "cbre"
+    if "VOIT REAL ESTATE SERVICES" in joined:
+        return "voit"
+    return "kidder"
+
+
+# A grid cell: (1,234) / (12.3)% negative, 1,234 / 12.3% / $1.41 / -123 / 0,
+# N/A, or a lone dash meaning an explicit NULL cell (kept as a token so
+# positional column alignment survives blank cells).
+_GRID_CELL = re.compile(
+    r"\(\$?[\d,]+(?:\.\d+)?\)%?"
+    r"|\$?-?[\d,]*\.?\d+%?"
+    r"|N/?A"
+    r"|[-–—]",
+    re.IGNORECASE,
+)
+
+
+def _grid_value(cell: str, scale: float = 1.0) -> float | None:
+    """Parse a CBRE/Voit cell. (parens)=negative, dash/NA=None, strip $ , %."""
+    if cell is None:
+        return None
+    s = str(cell).strip()
+    if not s or s in ("-", "–", "—") or s.upper() in ("NA", "N/A"):
+        return None
+    s = s.replace(",", "")
+    if s.endswith("%"):
+        s = s[:-1].strip()
+    neg = s.startswith("(") and s.endswith(")")
+    if neg:
+        s = s[1:-1].strip()
+    s = s.replace("$", "").strip()
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    v = -v if neg else v
+    return v * scale
+
+
+def _grid_data_rows(page) -> list[tuple[str, list[str], str]]:
+    """Yield (label, [cell, ...], raw_line) for each text row on a page.
+
+    Uses the same word y-grouping as the Kidder submarket-stats parser. The
+    label is everything before the first value-shaped token; cells are the
+    value tokens (including dash NULL placeholders) left-to-right.
+    """
+    words = page.extract_words(x_tolerance=2, y_tolerance=3)
+    out: list[tuple[str, list[str], str]] = []
+    for row in _group_rows(words):
+        line = " ".join(w["text"] for w in row).strip()
+        if not line:
+            continue
+        tokens = list(_GRID_CELL.finditer(line))
+        cells = [t.group() for t in tokens]
+        label = line[:tokens[0].start()].strip() if tokens else line
+        out.append((label, cells, line))
+    return out
+
+
+# (metric_type, unit, lease_type, scale) left-to-right after the submarket col.
+_CBRE_COLS = [
+    ("total_inventory", "sf", None, 1_000_000),  # Net Rentable Area (MSF)->SF
+    ("total_vacancy_rate", "percent", None, 1),
+    ("total_availability_rate", "percent", None, 1),
+    ("direct_availability_rate", "percent", None, 1),
+    ("sublease_availability_rate", "percent", None, 1),
+    ("asking_rent", "dollar_per_sf", "NNN", 1),
+    ("net_absorption", "sf", None, 1),
+    ("deliveries", "sf", None, 1),
+    ("ytd_net_absorption", "sf", None, 1),
+    ("under_construction", "sf", None, 1),
+]
+
+_CBRE_HEADER_RE = re.compile(
+    r"FIGURES\s*[|｜]\s*(?P<market>[A-Za-z .,'/&-]+?)\s*[|｜]\s*"
+    r"Q\s*(?P<q>[1-4])\s+(?P<yr>\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _cbre_header(pages: list[str], filepath: str) -> dict:
+    info = {"quarter": None, "market": None, "asset_class": None}
+    head = "\n".join(pages[:2])
+    m = _CBRE_HEADER_RE.search(head.replace("\n", " "))
+    if m:
+        info["market"] = _title_case_market(m.group("market").strip())
+        info["quarter"] = f"{m.group('q')}Q {m.group('yr')}"
+    if not info["quarter"]:
+        qm = re.search(r"\bQ\s*([1-4])\s+(\d{4})\b", head)
+        if qm:
+            info["quarter"] = f"{qm.group(1)}Q {qm.group(2)}"
+    up = head.upper()
+    for ac in KNOWN_ASSET_CLASSES:
+        if ac.upper() in up:
+            info["asset_class"] = ac
+            break
+    # Filename fallback: CBRE-Orange_County_Industrial_Figur.pdf
+    if not info["market"] or not info["asset_class"]:
+        stem = re.sub(r"\.pdf$", "", os.path.basename(filepath), flags=re.I)
+        stem = re.sub(r"^CBRE[-_ ]*", "", stem, flags=re.I)
+        stem = re.sub(r"[-_ ]*Figur\w*$", "", stem, flags=re.I)
+        kept = []
+        for p in re.split(r"[-_ ]+", stem):
+            if p.lower() in KNOWN_ASSET_CLASSES:
+                info["asset_class"] = info["asset_class"] or p.lower()
+            elif p:
+                kept.append(p)
+        if not info["market"] and kept:
+            info["market"] = _title_case_market(" ".join(kept))
+    info["asset_class"] = info["asset_class"] or "industrial"
+    return info
+
+
+def _parse_cbre(pdf, pages: list[str], source: str,
+                filepath: str) -> list[dict]:
+    """Parse the CBRE 'Market Statistics by Submarket' grid (Figure 9)."""
+    header = _cbre_header(pages, filepath)
+    if not header["quarter"]:
+        _warn(f"{source}: CBRE — could not detect quarter; skipping.")
+        return []
+    if not header["market"]:
+        _warn(f"{source}: CBRE — could not detect market; skipping.")
+        return []
+    report_quarter = header["quarter"]
+    report_date = quarter_to_date(report_quarter)
+
+    target = None
+    for i, txt in enumerate(pages):
+        if "MARKET STATISTICS BY SUBMARKET" in (txt or "").upper():
+            target = i
+            break
+    if target is None:
+        _warn(f"{source}: CBRE — 'Market Statistics by Submarket' table "
+              f"not found; skipping.")
+        return []
+
+    n = len(_CBRE_COLS)
+    records: list[dict] = []
+    started = False
+    for label, cells, line in _grid_data_rows(pdf.pages[target]):
+        up = line.upper()
+        if "MARKET STATISTICS BY SUBMARKET" in up:
+            started = True
+            continue
+        if not started:
+            continue
+        if ("MARKET STATISTICS BY SIZE" in up or "CBRE RESEARCH" in up
+                or up.startswith("FIGURE")):
+            break
+        if len(cells) < n or not label:
+            continue
+        is_total = bool(re.match(r"^total\b", label, re.IGNORECASE))
+        submarket = "Market Total" if is_total else label
+        for (mt, unit, lease, scale), raw in zip(_CBRE_COLS, cells[-n:]):
+            val = _grid_value(raw, scale)
+            if val is None:
+                continue
+            records.append({
+                "source": source, "source_page": target + 1,
+                "report_date": report_date, "quarter": report_quarter,
+                "metric_period": report_date, "period_type": "current",
+                "market": header["market"], "submarket": submarket,
+                "asset_class": header["asset_class"], "metric_type": mt,
+                "metric_value": val, "unit": unit, "lease_type": lease,
+                "confidence": 0.90, "raw_text": line[:200],
+                "parser_strategy": "cbre_submarket_table",
+                "extraction_notes": f"CBRE col: {mt}",
+            })
+    if not records:
+        _warn(f"{source}: CBRE — submarket table located but no data rows "
+              f"parsed (column layout may need tuning for this report).")
+    return records
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
 def parse_pdf(filepath: str) -> list[dict]:
-    """
-    Parse a Kidder Mathews PDF and return a list of metric dicts.
-    Auto-detects structured / dual-breakdown / submarket-statistics / narrative
-    strategies.
+    """Parse a market-report PDF and return a list of metric dicts.
+
+    Dispatches by publisher: CBRE and Voit have dedicated single-period grid
+    parsers; everything else falls through to the Kidder Mathews strategies
+    (structured / dual-breakdown / submarket-statistics / narrative).
     """
     PARSER_WARNINGS.clear()
     source = os.path.basename(filepath)
-    all_records = []
 
     with pdfplumber.open(filepath) as pdf:
-        pages = []
-        page_breaks = []  # cumulative char offsets for page boundaries
-        offset = 0
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            pages.append(text)
-            offset += len(text) + 1  # +1 for the \n join
-            page_breaks.append(offset)
+        pages = [(p.extract_text() or "") for p in pdf.pages]
+        provider = _detect_provider(pages)
+        if provider == "cbre":
+            return _parse_cbre(pdf, pages, source, filepath)
+        return _parse_kidder(pdf, pages, source, filepath)
 
-        full_text = "\n".join(pages)
-        header = _detect_header(pages[0], filepath=filepath)
 
-        if not header["quarter"]:
-            _warn(f"{source}: could not detect quarter from header — skipping.")
-            return []
-        if not header["asset_class"]:
-            _warn(f"{source}: could not detect asset class from header — skipping.")
-            return []
-        if not header["market"]:
-            _warn(f"{source}: could not detect market — skipping (records would be rejected).")
-            return []
+def _parse_kidder(pdf, pages: list[str], source: str,
+                  filepath: str) -> list[dict]:
+    """Kidder Mathews multi-strategy parser (unchanged behavior)."""
+    all_records = []
 
-        # --- Dual-breakdown (Silicon Valley page 1) ---
-        # Try this BEFORE single-table structured parsing to avoid the
-        # single-table parser mashing both columns together.
-        dual_pages_handled: set[int] = set()
-        for i, page in enumerate(pdf.pages):
-            dual_recs = _parse_dual_breakdown(page, header, source, i + 1)
-            if dual_recs:
-                all_records.extend(dual_recs)
-                dual_pages_handled.add(i)
+    page_breaks = []  # cumulative char offsets for page boundaries
+    offset = 0
+    for text in pages:
+        offset += len(text) + 1  # +1 for the \n join
+        page_breaks.append(offset)
 
-        # --- Structured parsing (single MARKET BREAKDOWN/SUMMARY tables) ---
-        has_structured = bool(dual_pages_handled)
-        for i, page_text in enumerate(pages):
-            if i in dual_pages_handled:
-                continue
-            submarket = None
-            sub_match = re.search(
-                r"(?:^|\n)\s*(ADA COUNTY|CANYON COUNTY)\s*(?:\n|$)",
-                page_text[:200]
-            )
-            if sub_match:
-                submarket = sub_match.group(1).strip().title()
+    full_text = "\n".join(pages)
+    header = _detect_header(pages[0], filepath=filepath)
 
-            if re.search(r"(?:^|\n)\s*BREAKDOWN\s*(?:\n|$)", page_text, re.IGNORECASE) or \
-               re.search(r"MARKET\s+SUMMARY", page_text, re.IGNORECASE) or \
-               re.search(r"MARKET\s+BREAKDOWN", page_text, re.IGNORECASE):
-                recs = _parse_structured_table(page_text, header, source, i + 1, submarket)
-                if recs:
-                    has_structured = True
-                    all_records.extend(recs)
+    if not header["quarter"]:
+        _warn(f"{source}: could not detect quarter from header — skipping.")
+        return []
+    if not header["asset_class"]:
+        _warn(f"{source}: could not detect asset class from header — skipping.")
+        return []
+    if not header["market"]:
+        _warn(f"{source}: could not detect market — skipping (records would be rejected).")
+        return []
 
-        # --- SUBMARKET STATISTICS table (East Bay, Orange County, Silicon Valley) ---
-        for i, page in enumerate(pdf.pages):
-            sub_recs = _parse_submarket_statistics(page, header, source, i + 1)
-            all_records.extend(sub_recs)
+    # --- Dual-breakdown (Silicon Valley page 1) ---
+    # Try this BEFORE single-table structured parsing to avoid the
+    # single-table parser mashing both columns together.
+    dual_pages_handled: set[int] = set()
+    for i, page in enumerate(pdf.pages):
+        dual_recs = _parse_dual_breakdown(page, header, source, i + 1)
+        if dual_recs:
+            all_records.extend(dual_recs)
+            dual_pages_handled.add(i)
 
-        # --- Sidebar parsing (page 1 only) ---
-        sidebar_records = _parse_sidebar(pages[0], header, source, 1)
-        existing = {(r["metric_type"], r["period_type"], r.get("submarket"), r.get("asset_class"))
-                    for r in all_records}
-        for sr in sidebar_records:
-            key = (sr["metric_type"], sr["period_type"], sr.get("submarket"), sr.get("asset_class"))
-            if key not in existing:
-                all_records.append(sr)
+    # --- Structured parsing (single MARKET BREAKDOWN/SUMMARY tables) ---
+    has_structured = bool(dual_pages_handled)
+    for i, page_text in enumerate(pages):
+        if i in dual_pages_handled:
+            continue
+        submarket = None
+        sub_match = re.search(
+            r"(?:^|\n)\s*(ADA COUNTY|CANYON COUNTY)\s*(?:\n|$)",
+            page_text[:200]
+        )
+        if sub_match:
+            submarket = sub_match.group(1).strip().title()
 
-        # --- Narrative submarket parsing ---
-        if not has_structured or header.get("market") == "Seattle":
-            all_records.extend(
-                _parse_narrative_submarkets(full_text, header, source, page_breaks)
-            )
+        if re.search(r"(?:^|\n)\s*BREAKDOWN\s*(?:\n|$)", page_text, re.IGNORECASE) or \
+           re.search(r"MARKET\s+SUMMARY", page_text, re.IGNORECASE) or \
+           re.search(r"MARKET\s+BREAKDOWN", page_text, re.IGNORECASE):
+            recs = _parse_structured_table(page_text, header, source, i + 1, submarket)
+            if recs:
+                has_structured = True
+                all_records.extend(recs)
 
-        # --- Cap rate from later pages ---
-        for i, page_text in enumerate(pages[1:], start=2):
-            cap_recs = _parse_sidebar(page_text, header, source, i)
-            existing_caps = {r.get("submarket") for r in all_records if r["metric_type"] == "cap_rate"}
-            for cr in cap_recs:
-                if cr["metric_type"] == "cap_rate" and cr.get("submarket") not in existing_caps:
-                    all_records.append(cr)
+    # --- SUBMARKET STATISTICS table (East Bay, Orange County, Silicon Valley) ---
+    for i, page in enumerate(pdf.pages):
+        sub_recs = _parse_submarket_statistics(page, header, source, i + 1)
+        all_records.extend(sub_recs)
+
+    # --- Sidebar parsing (page 1 only) ---
+    sidebar_records = _parse_sidebar(pages[0], header, source, 1)
+    existing = {(r["metric_type"], r["period_type"], r.get("submarket"), r.get("asset_class"))
+                for r in all_records}
+    for sr in sidebar_records:
+        key = (sr["metric_type"], sr["period_type"], sr.get("submarket"), sr.get("asset_class"))
+        if key not in existing:
+            all_records.append(sr)
+
+    # --- Narrative submarket parsing ---
+    if not has_structured or header.get("market") == "Seattle":
+        all_records.extend(
+            _parse_narrative_submarkets(full_text, header, source, page_breaks)
+        )
+
+    # --- Cap rate from later pages ---
+    for i, page_text in enumerate(pages[1:], start=2):
+        cap_recs = _parse_sidebar(page_text, header, source, i)
+        existing_caps = {r.get("submarket") for r in all_records if r["metric_type"] == "cap_rate"}
+        for cr in cap_recs:
+            if cr["metric_type"] == "cap_rate" and cr.get("submarket") not in existing_caps:
+                all_records.append(cr)
 
     return all_records
 
