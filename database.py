@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     confidence      REAL,
     raw_text        TEXT,
     parser_strategy TEXT,
+    lease_type      TEXT,
     extraction_notes TEXT,
     date_ingested   TEXT NOT NULL,
     last_edited_by  TEXT,
@@ -156,6 +157,21 @@ def init_db(db_path: str | None = None):
                 "ON metrics(source_file_id)"
             )
 
+        # lease_type: NNN vs industrial_gross for rent metrics. New CBRE/Voit
+        # rows carry it from the parser; backfill pre-existing asking_rent
+        # rows (all Kidder, NNN). Idempotent: only touches NULLs.
+        if not _column_exists(conn, "metrics", "lease_type"):
+            conn.execute("ALTER TABLE metrics ADD COLUMN lease_type TEXT")
+        conn.execute(
+            "UPDATE metrics SET lease_type='industrial_gross' "
+            "WHERE metric_type='asking_rent' AND lease_type IS NULL "
+            "AND parser_strategy='voit_submarket_table'"
+        )
+        conn.execute(
+            "UPDATE metrics SET lease_type='NNN' "
+            "WHERE metric_type='asking_rent' AND lease_type IS NULL"
+        )
+
         # Backfill legacy placeholder rows for any source not yet tracked.
         orphan_sources = conn.execute(
             """
@@ -280,16 +296,17 @@ def insert_metrics(records: list[dict], db_path: str | None = None,
                    (source, source_page, report_date, quarter, metric_period,
                     period_type, market, submarket, asset_class, metric_type,
                     metric_value, unit, confidence, raw_text, parser_strategy,
-                    extraction_notes, date_ingested, last_edited_by,
-                    last_edited_at, source_file_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    lease_type, extraction_notes, date_ingested,
+                    last_edited_by, last_edited_at, source_file_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     r["source"], r.get("source_page"), r["report_date"],
                     r["quarter"], r["metric_period"], r["period_type"],
                     r["market"], r.get("submarket"), r["asset_class"],
                     r["metric_type"], r.get("metric_value"), r["unit"],
                     r.get("confidence"), r.get("raw_text"),
-                    r.get("parser_strategy"), r.get("extraction_notes"),
+                    r.get("parser_strategy"), r.get("lease_type"),
+                    r.get("extraction_notes"),
                     now, user, now, source_file_id,
                 ),
             )

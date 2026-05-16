@@ -208,6 +208,13 @@ LOW_CONFIDENCE_THRESHOLD = 0.85
 METRIC_GLOSSARY = {
     "vacancy_rate": "Percentage of total inventory currently unoccupied and available for lease.",
     "lease_rate": "Average asking rental rate per square foot, typically quoted as monthly NNN (triple net).",
+    "asking_rent": (
+        "Average asking rental rate per square foot per month. "
+        "NNN: tenant pays taxes/insurance/maintenance separately. "
+        "Industrial-gross: landlord includes most operating costs. NOT "
+        "directly comparable; gross rates are typically $0.20-0.40/sf/mo "
+        "higher than NNN for equivalent space."
+    ),
     "net_absorption": "Net change in occupied space over the period. Positive = more space occupied, negative = more space vacated.",
     "total_inventory": "Total rentable building area (square feet) tracked in this market/submarket.",
     "under_construction": "Square footage of new buildings currently being built but not yet delivered.",
@@ -272,6 +279,18 @@ def _format_value_short(val, unit: str) -> str:
     elif unit == "sf" and abs(val) >= 1_000:
         return f"{val / 1_000:.0f}K"
     return f"{val:,.0f}"
+
+
+def _lease_label(lease_type) -> str:
+    """Human label for a lease_type value. NNN stays NNN; the stored
+    'industrial_gross' renders as 'industrial-gross'. Empty for None."""
+    if lease_type is None or (isinstance(lease_type, float) and pd.isna(lease_type)):
+        return ""
+    if lease_type == "NNN":
+        return "NNN"
+    if lease_type == "industrial_gross":
+        return "industrial-gross"
+    return str(lease_type)
 
 
 def _warn_suffix(confidence: float | None) -> str:
@@ -1379,6 +1398,10 @@ def _show_metric_cards(df: pd.DataFrame, label: str):
             confidence = row["confidence"]
 
             display = _format_value(val, unit)
+            if metric_type == "asking_rent":
+                ll = _lease_label(row.get("lease_type"))
+                if ll:
+                    display += f" {ll}"
             warn = _warn_suffix(confidence)
 
             period = row["metric_period"]
@@ -1503,15 +1526,48 @@ def page_trends():
                                format_func=_sub_label,
                                help=FILTER_HELP["submarket"])
 
+    # Lease-type control. asking_rent mixes NNN (Kidder/CBRE) and
+    # industrial-gross (Voit), which are NOT comparable, so they must
+    # never share a line. Default to NNN with a note when both exist.
+    sel_lease = None
+    if sel_metric == "asking_rent":
+        leases = base["lease_type"].dropna().unique().tolist()
+        opts = []
+        if "NNN" in leases:
+            opts.append("NNN")
+        if "industrial_gross" in leases:
+            opts.append("industrial-gross")
+        if len(opts) > 1:
+            opts.append("Both (separate series)")
+        if opts:
+            sel_lease = st.radio(
+                "Lease type", opts, index=0, horizontal=True,
+                key="trend_lease", help=_metric_help("asking_rent"),
+            )
+            if sel_lease == "NNN" and "industrial_gross" in leases:
+                st.caption(
+                    "Showing NNN only. Voit data uses industrial-gross "
+                    "— toggle in filter."
+                )
+
     # Filter data
     filtered = df[(df["market"] == sel_market) & (df["metric_type"] == sel_metric)]
     if sel_sub != "(all)":
         filtered = filtered[filtered["submarket"] == sel_sub]
+    if sel_lease == "NNN":
+        filtered = filtered[filtered["lease_type"] == "NNN"]
+    elif sel_lease == "industrial-gross":
+        filtered = filtered[filtered["lease_type"] == "industrial_gross"]
+    # "Both (separate series)" and non-rent metrics: keep all rows; the
+    # per-lease label below splits them into distinct chart series.
 
     # Deduplicate first so the data-point count matches what the chart plots
-    # (one value per submarket per period).
+    # (one value per submarket per period — per lease type for rents).
+    _dedup_cols = ["submarket", "metric_period"]
+    if sel_metric == "asking_rent":
+        _dedup_cols = ["submarket", "metric_period", "lease_type"]
     filtered = filtered.sort_values("confidence", ascending=False).drop_duplicates(
-        subset=["submarket", "metric_period"], keep="first"
+        subset=_dedup_cols, keep="first"
     ).copy()
 
     # Empty-state guard: a single lonely dot on a stretched axis is worse
@@ -1538,8 +1594,19 @@ def page_trends():
         )
         return
 
-    # Create label for chart
-    filtered["label"] = filtered["submarket"].fillna("Market-wide")
+    # Create label for chart. For rents, fold the lease type into the
+    # series name so NNN and industrial-gross never plot as one line.
+    if sel_metric == "asking_rent":
+        filtered["label"] = filtered.apply(
+            lambda r: (
+                (r["submarket"] if pd.notna(r["submarket"]) else "Market-wide")
+                + (f" ({_lease_label(r['lease_type'])})"
+                   if _lease_label(r["lease_type"]) else "")
+            ),
+            axis=1,
+        )
+    else:
+        filtered["label"] = filtered["submarket"].fillna("Market-wide")
 
     # Build chart with per-series control
     unit = filtered["unit"].iloc[0]
@@ -1715,9 +1782,16 @@ def page_comparison():
     def latest_metrics(d):
         if d.empty:
             return {}
-        idx = d.groupby("metric_type")["metric_period"].idxmax()
+        d = d.copy()
+        d["__key"] = d["metric_type"]
+        rent = d["metric_type"] == "asking_rent"
+        # Keep NNN and industrial-gross as separate rows \u2014 not comparable.
+        d.loc[rent, "__key"] = (
+            "asking_rent::" + d.loc[rent, "lease_type"].fillna("?")
+        )
+        idx = d.groupby("__key")["metric_period"].idxmax()
         latest = d.loc[idx]
-        return {row["metric_type"]: row for _, row in latest.iterrows()}
+        return {row["__key"]: row for _, row in latest.iterrows()}
 
     m1 = latest_metrics(d1)
     m2 = latest_metrics(d2)
@@ -1727,6 +1801,9 @@ def page_comparison():
     if not all_metrics:
         st.info("No comparable metrics found.")
         return
+
+    def _metric_name(key):
+        return key.split("::", 1)[0].replace("_", " ").title()
 
     # Comparison table
     comp_rows = []
@@ -1738,11 +1815,15 @@ def page_comparison():
             if row is None:
                 return "\u2014"
             display = _format_value_short(row["metric_value"], row["unit"])
+            if row["metric_type"] == "asking_rent":
+                ll = _lease_label(row.get("lease_type"))
+                if ll:
+                    display += f" {ll}"
             display += _warn_suffix(row["confidence"])
             return display
 
         comp_rows.append({
-            "Metric": mt.replace("_", " ").title(),
+            "Metric": _metric_name(mt),
             sub1: _fmt(r1),
             sub2: _fmt(r2),
         })
@@ -1769,10 +1850,15 @@ def page_comparison():
 
     # Metric glossary
     with st.expander("Metric definitions"):
+        seen_defs = set()
         for mt in all_metrics:
-            glossary = _metric_help(mt)
+            base_mt = mt.split("::", 1)[0]
+            if base_mt in seen_defs:
+                continue
+            seen_defs.add(base_mt)
+            glossary = _metric_help(base_mt)
             if glossary:
-                st.markdown(f"**{mt.replace('_', ' ').title()}**: {glossary}")
+                st.markdown(f"**{_metric_name(mt)}**: {glossary}")
 
 
 # ---------------------------------------------------------------------------
@@ -1837,8 +1923,9 @@ def page_raw_data():
     # Display columns: pretty display_name first, raw source kept as reference
     display_cols = [
         "id", "display_name", "source", "quarter", "market", "submarket",
-        "metric_type", "metric_value", "unit", "metric_period", "period_type",
-        "confidence", "parser_strategy", "last_edited_by", "last_edited_at",
+        "metric_type", "metric_value", "unit", "lease_type", "metric_period",
+        "period_type", "confidence", "parser_strategy", "last_edited_by",
+        "last_edited_at",
     ]
     existing_cols = [c for c in display_cols if c in filtered.columns]
     st.dataframe(
