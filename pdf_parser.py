@@ -1448,6 +1448,11 @@ def _parse_cbre(pdf, pages: list[str], source: str,
 
 
 # (metric_type, unit, lease_type) left-to-right after the submarket col.
+# A None metric_type marks a real table column we deliberately don't
+# store — it still occupies a position so the rest stay aligned. The live
+# OC/SD Voit reports carry an Average Sales Price ($/SF) column between
+# the asking rate and net absorption that has no schema home; omitting it
+# shifted every column left by one (building_count was dropped).
 _VOIT_COLS = [
     ("building_count", "number", None),
     ("total_inventory", "sf", None),
@@ -1458,6 +1463,7 @@ _VOIT_COLS = [
     ("available_sf", "sf", None),
     ("total_availability_rate", "percent", None),
     ("asking_rent", "dollar_per_sf", "industrial_gross"),
+    (None, None, None),  # Average Sales Price ($/SF) — not in schema
     ("net_absorption", "sf", None),
     ("ytd_net_absorption", "sf", None),
     ("gross_absorption", "sf", None),
@@ -1525,6 +1531,8 @@ def _parse_voit(pdf, pages: list[str], source: str,
         else:
             submarket = label
         for (mt, unit, lease), raw in zip(_VOIT_COLS, cells[-n:]):
+            if mt is None:  # positional placeholder (e.g. sales price)
+                continue
             val = _grid_value(raw)
             if val is None:
                 continue
