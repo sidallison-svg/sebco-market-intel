@@ -1447,6 +1447,104 @@ def _parse_cbre(pdf, pages: list[str], source: str,
     return records
 
 
+# (metric_type, unit, lease_type) left-to-right after the submarket col.
+_VOIT_COLS = [
+    ("building_count", "number", None),
+    ("total_inventory", "sf", None),
+    ("under_construction", "sf", None),
+    ("planned_construction", "sf", None),
+    ("vacant_sf", "sf", None),
+    ("total_vacancy_rate", "percent", None),
+    ("available_sf", "sf", None),
+    ("total_availability_rate", "percent", None),
+    ("asking_rent", "dollar_per_sf", "industrial_gross"),
+    ("net_absorption", "sf", None),
+    ("ytd_net_absorption", "sf", None),
+    ("gross_absorption", "sf", None),
+    ("ytd_gross_absorption", "sf", None),
+]
+
+_VOIT_MARKETS = {"SD": "San Diego", "OC": "Orange County",
+                 "IE": "Inland Empire", "LA": "Los Angeles"}
+
+_VOIT_CODE_RES = [
+    re.compile(r"\b(SD|OC|IE|LA)\s*Q\s*([1-4])\s*'?(\d{2})\b", re.I),  # SDQ126
+    re.compile(r"\b(SD|OC|IE|LA)\s*([1-4])\s*Q\s*'?(\d{2})\b", re.I),  # SD1Q26
+]
+
+
+def _voit_header(pages: list[str], filepath: str) -> dict:
+    info = {"quarter": None, "market": None, "asset_class": "industrial"}
+    hay = os.path.basename(filepath) + "\n" + "\n".join(pages[:3])
+    for rx in _VOIT_CODE_RES:
+        m = rx.search(hay)
+        if m:
+            info["market"] = _VOIT_MARKETS.get(m.group(1).upper())
+            info["quarter"] = f"{m.group(2)}Q 20{m.group(3)}"
+            break
+    up = ("\n".join(pages[:3])).upper()
+    for ac in KNOWN_ASSET_CLASSES:
+        if ac.upper() in up:
+            info["asset_class"] = ac
+            break
+    return info
+
+
+def _parse_voit(pdf, pages: list[str], source: str,
+                filepath: str) -> list[dict]:
+    """Parse the Voit page-3 submarket table (skips bottom size-range rows)."""
+    header = _voit_header(pages, filepath)
+    if not header["market"] or not header["quarter"]:
+        _warn(f"{source}: Voit — could not detect market/quarter from the "
+              f"report code; skipping.")
+        return []
+    report_quarter = header["quarter"]
+    report_date = quarter_to_date(report_quarter)
+    if len(pdf.pages) < 3:
+        _warn(f"{source}: Voit — expected the submarket table on page 3 "
+              f"but the PDF has fewer pages; skipping.")
+        return []
+
+    mkt_low = header["market"].lower()
+    mkt_first = mkt_low.split()[0]
+    n = len(_VOIT_COLS)
+    records: list[dict] = []
+    for label, cells, line in _grid_data_rows(pdf.pages[2]):
+        if len(cells) < n or not label:
+            continue
+        # Size-range rows like '0-9,999' or '100,000+' — skip entirely.
+        if re.match(r"^\s*\d[\d,]*\s*(?:[-–]\s*\d[\d,]*|\+)", label):
+            continue
+        low = label.lower()
+        if low.endswith("total"):
+            if mkt_low in low or low.startswith(mkt_first):
+                submarket = "Market Total"
+            else:
+                submarket = re.sub(r"\s*total\s*$", "", label,
+                                   flags=re.I).strip()
+        else:
+            submarket = label
+        for (mt, unit, lease), raw in zip(_VOIT_COLS, cells[-n:]):
+            val = _grid_value(raw)
+            if val is None:
+                continue
+            records.append({
+                "source": source, "source_page": 3,
+                "report_date": report_date, "quarter": report_quarter,
+                "metric_period": report_date, "period_type": "current",
+                "market": header["market"], "submarket": submarket,
+                "asset_class": header["asset_class"], "metric_type": mt,
+                "metric_value": val, "unit": unit, "lease_type": lease,
+                "confidence": 0.90, "raw_text": line[:200],
+                "parser_strategy": "voit_submarket_table",
+                "extraction_notes": f"Voit col: {mt}",
+            })
+    if not records:
+        _warn(f"{source}: Voit — page-3 table produced no rows (column "
+              f"layout may need tuning for this report).")
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -1466,6 +1564,8 @@ def parse_pdf(filepath: str) -> list[dict]:
         provider = _detect_provider(pages)
         if provider == "cbre":
             return _parse_cbre(pdf, pages, source, filepath)
+        if provider == "voit":
+            return _parse_voit(pdf, pages, source, filepath)
         return _parse_kidder(pdf, pages, source, filepath)
 
 
