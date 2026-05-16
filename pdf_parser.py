@@ -1273,6 +1273,8 @@ def _detect_provider(pages: list[str]) -> str:
         return "cbre"
     if "VOIT REAL ESTATE SERVICES" in joined:
         return "voit"
+    if "JONES LANG LASALLE" in joined:
+        return "jll"
     return "kidder"
 
 
@@ -1557,6 +1559,134 @@ def _parse_voit(pdf, pages: list[str], source: str,
 
 
 # ---------------------------------------------------------------------------
+# JLL (Jones Lang LaSalle) parser
+# ---------------------------------------------------------------------------
+#
+# JLL "insights" reports carry a page-2 submarket table where each submarket
+# spans three rows (Warehouse & Distribution / Manufacturing / Overall Total),
+# stored as distinct asset_class values. Some JLL reports (e.g. Seattle) have
+# no submarket table at all — those are rejected cleanly.
+
+# (metric_type, unit, lease_type) left-to-right after the row-label column.
+_JLL_COLS = [
+    ("total_inventory", "sf", None),
+    ("net_absorption", "sf", None),
+    ("ytd_net_absorption", "sf", None),
+    ("ytd_absorption_pct_of_stock", "percent", None),
+    ("total_vacancy_rate", "percent", None),
+    ("total_availability_rate", "percent", None),
+    ("asking_rent", "dollar_per_sf", "NNN"),
+    ("deliveries", "sf", None),
+    ("ytd_deliveries", "sf", None),
+    ("under_construction", "sf", None),
+]
+
+_JLL_HEADER_RE = re.compile(
+    r"Industrial\s*\|\s*Q\s*([1-4])\s+(\d{4})", re.IGNORECASE
+)
+
+
+def _jll_header(pages: list[str], filepath: str) -> dict:
+    info = {"quarter": None, "market": None, "asset_class": "industrial"}
+    p1 = pages[0] if pages else ""
+    m = _JLL_HEADER_RE.search(p1)
+    if m:
+        info["quarter"] = f"{m.group(1)}Q {m.group(2)}"
+    # Market = the title line right after the "Industrial | QX YYYY" header.
+    lines = [ln.strip() for ln in p1.split("\n")]
+    for i, ln in enumerate(lines):
+        if _JLL_HEADER_RE.search(ln):
+            for nxt in lines[i + 1:]:
+                if nxt:
+                    info["market"] = nxt
+                    break
+            break
+    if info["market"] and "seattle" in info["market"].lower():
+        info["market"] = "Seattle"
+    return info
+
+
+def _jll_asset_class(label: str) -> str | None:
+    low = label.strip().lower()
+    if low.startswith("warehouse"):
+        return "warehouse_distribution"
+    if low.startswith("manufacturing"):
+        return "manufacturing"
+    if low.startswith("overall"):
+        return "overall"
+    return None
+
+
+def _parse_jll(pdf, pages: list[str], source: str,
+               filepath: str) -> list[dict]:
+    """Parse the JLL page-2 submarket table.
+
+    Each submarket name appears on its own line, followed by three rows
+    (W&D / Manufacturing / Overall Total). Reports without that table
+    (e.g. Seattle) are rejected cleanly.
+    """
+    header = _jll_header(pages, filepath)
+    if not header["market"] or not header["quarter"]:
+        _warn(f"{source}: JLL — could not detect market/quarter from the "
+              f"page-1 header; skipping.")
+        return []
+    report_quarter = header["quarter"]
+    report_date = quarter_to_date(report_quarter)
+
+    target = None
+    for i, txt in enumerate(pages):
+        if "WAREHOUSE & DISTRIBUTION" in (txt or "").upper():
+            target = i
+            break
+    if target is None:
+        _warn(f"{source}: JLL — no submarket detail in this JLL report; "
+              f"rejected.")
+        return []
+
+    n = len(_JLL_COLS)
+    mkt_low = header["market"].lower()
+    records: list[dict] = []
+    current_submarket = None
+    last_blank = None
+    for label, cells, line in _grid_data_rows(pdf.pages[target]):
+        asset = _jll_asset_class(label)
+        if asset is not None and len(cells) >= n:
+            if asset == "warehouse_distribution":
+                # The submarket name is the most recent value-less line.
+                if last_blank:
+                    lb = last_blank.strip()
+                    if lb.lower().endswith("total") or mkt_low in lb.lower():
+                        current_submarket = "Market Total"
+                    else:
+                        current_submarket = lb
+            if current_submarket is None:
+                continue
+            for (mt, unit, lease), raw in zip(_JLL_COLS, cells[-n:]):
+                val = _grid_value(raw)
+                if val is None:
+                    continue
+                records.append({
+                    "source": source, "source_page": target + 1,
+                    "report_date": report_date, "quarter": report_quarter,
+                    "metric_period": report_date, "period_type": "current",
+                    "market": header["market"],
+                    "submarket": current_submarket,
+                    "asset_class": asset, "metric_type": mt,
+                    "metric_value": val, "unit": unit, "lease_type": lease,
+                    "confidence": 0.90, "raw_text": line[:200],
+                    "parser_strategy": "jll_submarket_table",
+                    "extraction_notes": f"JLL {asset} col: {mt}",
+                })
+        elif not cells and label:
+            last_blank = label
+
+    if not records:
+        _warn(f"{source}: JLL — submarket table found but no rows parsed "
+              f"(layout may need tuning for this report).")
+    return records
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1577,6 +1707,8 @@ def parse_pdf(filepath: str) -> list[dict]:
             return _parse_cbre(pdf, pages, source, filepath)
         if provider == "voit":
             return _parse_voit(pdf, pages, source, filepath)
+        if provider == "jll":
+            return _parse_jll(pdf, pages, source, filepath)
         return _parse_kidder(pdf, pages, source, filepath)
 
 

@@ -234,6 +234,8 @@ METRIC_GLOSSARY = {
     "under_construction": "Square footage of new buildings currently being built but not yet delivered.",
     "cap_rate": "Capitalization rate \u2014 ratio of net operating income to property value. Lower cap rate = higher property prices.",
     "sale_price_per_sf": "Average sale price per square foot for transactions in the period.",
+    "ytd_deliveries": "Cumulative new industrial space delivered since start of current year.",
+    "ytd_absorption_pct_of_stock": "Year-to-date net absorption as percentage of total market inventory — normalized for market size.",
     "yoy_rent_change": "Year-over-year percentage change in asking lease rates.",
     "yoy_vacancy_change": "Year-over-year change in vacancy rate (in percentage points).",
 }
@@ -730,7 +732,8 @@ def page_upload():
     st.header("Upload Market Reports")
     st.markdown(
         "Upload quarterly industrial market reports. Supports Kidder "
-        "Mathews, CBRE, and Voit Real Estate Services. Duplicate detection "
+        "Mathews, CBRE, Voit Real Estate Services, and JLL. Duplicate "
+        "detection "
         "runs automatically: identical files are blocked, and a different "
         "report covering the same market and quarter prompts you to replace "
         "or cancel."
@@ -817,8 +820,8 @@ def page_upload():
             st.error(
                 "Could not extract any data — this format is not yet "
                 "supported. Currently supported: Kidder Mathews, CBRE "
-                "Figures, and Voit Real Estate Services. The file hash has "
-                "been recorded and marked **rejected** so you don't keep "
+                "Figures, Voit Real Estate Services, and JLL. The file hash "
+                "has been recorded and marked **rejected** so you don't keep "
                 "retrying it."
             )
             continue
