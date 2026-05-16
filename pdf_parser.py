@@ -1419,8 +1419,11 @@ def _parse_cbre(pdf, pages: list[str], source: str,
             continue
         if not started:
             continue
-        if ("MARKET STATISTICS BY SIZE" in up or "CBRE RESEARCH" in up
-                or up.startswith("FIGURE")):
+        # End of the submarket table: the next section ("by Size"), the
+        # "Source: CBRE Research" caption, or the page footer. NB: do NOT
+        # break on "FIGURE" — "Figure 9" sits between the section title
+        # and the first data row, which would end parsing immediately.
+        if ("MARKET STATISTICS BY SIZE" in up or "CBRE RESEARCH" in up):
             break
         if len(cells) < n or not label:
             continue
