@@ -1453,11 +1453,12 @@ def _parse_cbre(pdf, pages: list[str], source: str,
 
 
 # (metric_type, unit, lease_type) left-to-right after the submarket col.
-# A None metric_type marks a real table column we deliberately don't
-# store — it still occupies a position so the rest stay aligned. The live
-# OC/SD Voit reports carry an Average Sales Price ($/SF) column between
-# the asking rate and net absorption that has no schema home; omitting it
-# shifted every column left by one (building_count was dropped).
+# Base 13-column layout (Voit San Diego). Some Voit reports (e.g. Orange
+# County) add an "Average Asking Sales Price" column between the asking
+# lease rate and net absorption; it has no schema home, so when present
+# a positional skip slot (None metric_type) is inserted at runtime so the
+# remaining columns stay aligned. The number of value columns therefore
+# varies per report and must be detected, not hard-coded.
 _VOIT_COLS = [
     ("building_count", "number", None),
     ("total_inventory", "sf", None),
@@ -1468,12 +1469,15 @@ _VOIT_COLS = [
     ("available_sf", "sf", None),
     ("total_availability_rate", "percent", None),
     ("asking_rent", "dollar_per_sf", "industrial_gross"),
-    (None, None, None),  # Average Sales Price ($/SF) — not in schema
     ("net_absorption", "sf", None),
     ("ytd_net_absorption", "sf", None),
     ("gross_absorption", "sf", None),
     ("ytd_gross_absorption", "sf", None),
 ]
+# Sales-price skip slot, inserted after asking_rent (index 9) when the
+# report includes that column.
+_VOIT_SALES_PRICE_COL = (None, None, None)
+_VOIT_SALES_PRICE_AT = 9
 
 _VOIT_MARKETS = {"SD": "San Diego", "OC": "Orange County",
                  "IE": "Inland Empire", "LA": "Los Angeles"}
@@ -1518,27 +1522,58 @@ def _parse_voit(pdf, pages: list[str], source: str,
 
     mkt_low = header["market"].lower()
     mkt_first = mkt_low.split()[0]
-    n = len(_VOIT_COLS)
+
+    # Column count varies: OC-style reports include an Average Asking
+    # Sales Price column (skipped), SD-style ones don't. Detect from the
+    # table-page header so the value-block width (n) is right per report.
+    table_text = pdf.pages[2].extract_text() or ""
+    if "SALES PRICE" in table_text.upper():
+        cols = (_VOIT_COLS[:_VOIT_SALES_PRICE_AT]
+                + [_VOIT_SALES_PRICE_COL]
+                + _VOIT_COLS[_VOIT_SALES_PRICE_AT:])
+    else:
+        cols = _VOIT_COLS
+    n = len(cols)
+    # Non-submarket rows to drop: size ranges ("10,000-19,999",
+    # "200,000 Plus", "100,000+"), "Less than X" / "Under X", and a
+    # bare/grand "Total" with no region prefix.
+    skip_name = re.compile(
+        r"^\s*(?:\d[\d,]*\s*(?:[-–]\s*\d[\d,]*|\+|plus\b)"
+        r"|less\s+than\b|under\s+\d"
+        r"|grand\s+total\s*$|total\s*$)",
+        re.IGNORECASE,
+    )
     records: list[dict] = []
-    for label, cells, line in _grid_data_rows(pdf.pages[2]):
-        if len(cells) < n or not label:
+    market_total_seen = False
+    for _label, _cells, line in _grid_data_rows(pdf.pages[2]):
+        # Recompute name + value cells from raw match offsets. _GRID_CELL's
+        # N/A token matches the substring "na" case-insensitively, which
+        # truncates submarket names like Anaheim / Buena Park / Laguna* /
+        # Santa Ana. The real value block is always the last n tokens, so
+        # the name is everything before the first of those.
+        matches = list(_GRID_CELL.finditer(line))
+        if len(matches) < n:
             continue
-        # Size-range rows like '0-9,999' or '100,000+' — skip entirely.
-        if re.match(r"^\s*\d[\d,]*\s*(?:[-–]\s*\d[\d,]*|\+)", label):
+        value_matches = matches[-n:]
+        name = line[:value_matches[0].start()].strip()
+        if not name or skip_name.match(name):
             continue
-        low = label.lower()
+        low = name.lower()
         if low.endswith("total"):
             if mkt_low in low or low.startswith(mkt_first):
                 submarket = "Market Total"
+                if market_total_seen:  # duplicated below the size ranges
+                    continue
+                market_total_seen = True
             else:
-                submarket = re.sub(r"\s*total\s*$", "", label,
+                submarket = re.sub(r"\s*total\s*$", "", name,
                                    flags=re.I).strip()
         else:
-            submarket = label
-        for (mt, unit, lease), raw in zip(_VOIT_COLS, cells[-n:]):
-            if mt is None:  # positional placeholder (e.g. sales price)
+            submarket = name
+        for (mt, unit, lease), m in zip(cols, value_matches):
+            if mt is None:  # positional placeholder (sales price)
                 continue
-            val = _grid_value(raw)
+            val = _grid_value(m.group())
             if val is None:
                 continue
             records.append({
