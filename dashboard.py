@@ -235,6 +235,7 @@ METRIC_GLOSSARY = {
     "cap_rate": "Capitalization rate \u2014 ratio of net operating income to property value. Lower cap rate = higher property prices.",
     "sale_price_per_sf": "Average sale price per square foot for transactions in the period.",
     "ytd_deliveries": "Cumulative new industrial space delivered since start of current year.",
+    "preleased_pct": "Percent of currently-under-development space that is already leased before completion.",
     "ytd_absorption_pct_of_stock": "Year-to-date net absorption as percentage of total market inventory — normalized for market size.",
     "yoy_rent_change": "Year-over-year percentage change in asking lease rates.",
     "yoy_vacancy_change": "Year-over-year change in vacancy rate (in percentage points).",

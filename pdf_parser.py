@@ -1652,6 +1652,79 @@ def _jll_asset_class(label: str) -> str | None:
     return None
 
 
+# Format B: single-page reports with only a page-1 "Fundamentals" box.
+# (label, metric_type, unit, lease_type). "Concessions" is intentionally
+# omitted — it's qualitative (Rising/Stable/Falling).
+_JLL_FUND_FIELDS = [
+    ("YTD net absorption", "ytd_net_absorption", "sf", None),
+    ("Under development", "under_construction", "sf", None),
+    ("Preleased", "preleased_pct", "percent", None),
+    ("YTD deliveries", "ytd_deliveries", "sf", None),
+    ("Total vacancy", "total_vacancy_rate", "percent", None),
+    ("Total availability", "total_availability_rate", "percent", None),
+    ("Average asking rent", "asking_rent", "dollar_per_sf", "NNN"),
+]
+
+
+def _jll_fund_number(raw: str) -> float | None:
+    """Parse a Fundamentals value: handles U+2212 minus, commas, $, and
+    'X.X million' (-> ×1e6)."""
+    s = raw.replace("−", "-").replace(",", "").replace("$", "").strip()
+    mult = 1.0
+    if "million" in s:
+        mult = 1_000_000.0
+        s = s.replace("million", "").strip()
+    try:
+        return float(s) * mult
+    except ValueError:
+        return None
+
+
+def _parse_jll_fundamentals(pages: list[str], header: dict,
+                            source: str) -> list[dict]:
+    """Parse the page-1 Fundamentals box (Format B market-level reports).
+
+    Each entry is `<label> <value> <arrow>`; the box values are
+    interleaved with narrative text by pdfplumber, so each label is
+    anchored to a value that must begin with a number/$ and end at the
+    trend arrow (↑/↓/→). This skips prose mentions of the same words
+    (e.g. Seattle's "Total vacancy climbed ...").
+    """
+    text = pages[0] if pages else ""
+    if "Fundamentals" not in text:
+        return []
+    report_quarter = header["quarter"]
+    report_date = quarter_to_date(report_quarter)
+    records: list[dict] = []
+    for label, mt, unit, lease in _JLL_FUND_FIELDS:
+        m = re.search(
+            re.escape(label)
+            + r"\s+(\$?−?-?\d[\d.,]*(?:\s*million)?)\s*"
+            r"(?:s\.f\.|p\.s\.f\.|%)?\s*[↑↓→]",
+            text,
+        )
+        if not m:
+            continue
+        val = _jll_fund_number(m.group(1))
+        if val is None:
+            continue
+        records.append({
+            "source": source, "source_page": 1,
+            "report_date": report_date, "quarter": report_quarter,
+            "metric_period": report_date, "period_type": "current",
+            "market": header["market"], "submarket": "Market Total",
+            "asset_class": "overall", "metric_type": mt,
+            "metric_value": val, "unit": unit, "lease_type": lease,
+            "confidence": 0.95, "raw_text": m.group(0).strip()[:200],
+            "parser_strategy": "jll_fundamentals",
+            "extraction_notes": f"JLL fundamentals: {label}",
+        })
+    if not records:
+        _warn(f"{source}: JLL — Fundamentals box found but no values "
+              f"could be parsed.")
+    return records
+
+
 def _parse_jll(pdf, pages: list[str], source: str,
                filepath: str) -> list[dict]:
     """Parse the JLL page-2 submarket table.
@@ -1674,6 +1747,10 @@ def _parse_jll(pdf, pages: list[str], source: str,
             target = i
             break
     if target is None:
+        # Format B: no submarket table — try the page-1 Fundamentals box.
+        fund = _parse_jll_fundamentals(pages, header, source)
+        if fund:
+            return fund
         _warn(f"{source}: JLL — no submarket detail in this JLL report; "
               f"rejected.")
         return []
