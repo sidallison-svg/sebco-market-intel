@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_rejected_source ON rejected_records(source);
 
 CREATE TABLE IF NOT EXISTS uploaded_files (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_hash         TEXT NOT NULL UNIQUE,
+    file_hash         TEXT NOT NULL,
     original_filename TEXT NOT NULL,
     display_name      TEXT,
     file_size_bytes   INTEGER,
@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS uploaded_files (
 CREATE INDEX IF NOT EXISTS idx_uploaded_hash ON uploaded_files(file_hash);
 CREATE INDEX IF NOT EXISTS idx_uploaded_identity
     ON uploaded_files(market, asset_class, report_date, quarter, status);
+-- file_hash is unique only among non-superseded rows: a superseded row
+-- keeps its hash for the audit trail while the same file can be
+-- re-uploaded as a new active row.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uploaded_files_hash_active
+    ON uploaded_files(file_hash) WHERE status <> 'superseded';
 
 CREATE TABLE IF NOT EXISTS saved_views (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +176,54 @@ def init_db(db_path: str | None = None):
             "UPDATE metrics SET lease_type='NNN' "
             "WHERE metric_type='asking_rent' AND lease_type IS NULL"
         )
+
+        # Drop the legacy global UNIQUE on uploaded_files.file_hash so a
+        # superseded row can keep its hash for audit while the same file is
+        # re-uploaded. SQLite can't drop a column constraint in place, so
+        # rebuild the table once (only when the old auto-unique index is
+        # still present). The partial unique index in SCHEMA_SQL then
+        # enforces uniqueness among non-superseded rows.
+        idx_list = conn.execute(
+            "PRAGMA index_list(uploaded_files)"
+        ).fetchall()
+        if any(r["origin"] == "u" for r in idx_list):
+            conn.executescript(
+                """
+                CREATE TABLE uploaded_files_new (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_hash         TEXT NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    display_name      TEXT,
+                    file_size_bytes   INTEGER,
+                    uploaded_at       TEXT NOT NULL,
+                    uploaded_by       TEXT,
+                    market            TEXT,
+                    asset_class       TEXT,
+                    report_date       TEXT,
+                    quarter           TEXT,
+                    record_count      INTEGER DEFAULT 0,
+                    parser_strategy   TEXT,
+                    status            TEXT NOT NULL DEFAULT 'active'
+                );
+                INSERT INTO uploaded_files_new
+                    SELECT id, file_hash, original_filename, display_name,
+                           file_size_bytes, uploaded_at, uploaded_by, market,
+                           asset_class, report_date, quarter, record_count,
+                           parser_strategy, status
+                    FROM uploaded_files;
+                DROP TABLE uploaded_files;
+                ALTER TABLE uploaded_files_new RENAME TO uploaded_files;
+                CREATE INDEX IF NOT EXISTS idx_uploaded_hash
+                    ON uploaded_files(file_hash);
+                CREATE INDEX IF NOT EXISTS idx_uploaded_identity
+                    ON uploaded_files(market, asset_class, report_date,
+                                      quarter, status);
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_uploaded_files_hash_active
+                    ON uploaded_files(file_hash)
+                    WHERE status <> 'superseded';
+                """
+            )
 
         # Backfill legacy placeholder rows for any source not yet tracked.
         orphan_sources = conn.execute(
@@ -323,13 +376,59 @@ def insert_metrics(records: list[dict], db_path: str | None = None,
 
 @_retry
 def get_file_by_hash(file_hash: str, db_path: str | None = None) -> dict | None:
-    """Layer 1 — exact-bytes lookup. Returns the uploaded_files row or None."""
+    """Layer 1 — exact-bytes lookup, ignoring superseded rows.
+
+    A superseded row keeps its hash only as an audit record; the same
+    file may legitimately be re-uploaded, so Layer 1 must not fire on it.
+    """
     conn = _get_connection(db_path)
     try:
         row = conn.execute(
-            "SELECT * FROM uploaded_files WHERE file_hash = ?", (file_hash,)
+            "SELECT * FROM uploaded_files WHERE file_hash = ? "
+            "AND status != ? ORDER BY uploaded_at DESC LIMIT 1",
+            (file_hash, STATUS_SUPERSEDED),
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+@_retry
+def count_metrics_for_file(file_id: int, db_path: str | None = None) -> int:
+    """Number of metric rows currently linked to an uploaded_files row."""
+    conn = _get_connection(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM metrics WHERE source_file_id = ?",
+            (file_id,),
+        ).fetchone()
+        return row["c"]
+    finally:
+        conn.close()
+
+
+@_retry
+def clear_orphan_upload(file_id: int, db_path: str | None = None) -> None:
+    """Remove an orphaned uploaded_files row (no live metrics) and its
+    rejected_records, so the same file can be re-processed cleanly."""
+    conn = _get_connection(db_path)
+    try:
+        fn_row = conn.execute(
+            "SELECT original_filename FROM uploaded_files WHERE id = ?",
+            (file_id,),
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM metrics WHERE source_file_id = ?", (file_id,)
+        )
+        if fn_row and fn_row["original_filename"]:
+            conn.execute(
+                "DELETE FROM rejected_records WHERE source = ?",
+                (fn_row["original_filename"],),
+            )
+        conn.execute(
+            "DELETE FROM uploaded_files WHERE id = ?", (file_id,)
+        )
+        conn.commit()
     finally:
         conn.close()
 

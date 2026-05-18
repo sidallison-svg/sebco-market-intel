@@ -26,6 +26,8 @@ import streamlit.components.v1 as components
 from config import get_db_path
 from database import (
     STATUS_REJECTED,
+    clear_orphan_upload,
+    count_metrics_for_file,
     delete_by_source,
     delete_rejected_record,
     delete_uploaded_file_row,
@@ -754,25 +756,27 @@ def page_upload():
         file_hash = _sha256(file_bytes)
         st.subheader(f"Processing: {uf.name}")
 
-        # ---- Layer 1: exact-bytes duplicate ----
+        # ---- Layer 1: exact-bytes duplicate (superseded rows ignored) ----
         existing = get_file_by_hash(file_hash)
         if existing:
-            when = _fmt_dt(existing.get("uploaded_at"))
-            orig = existing.get("original_filename") or uf.name
-            if existing.get("status") == STATUS_REJECTED:
-                st.error(
-                    f"This exact file was uploaded on {when} as '{orig}' and "
-                    f"produced **0 records** (marked rejected). It's recorded "
-                    f"so you don't keep retrying a broken file. If the parser "
-                    f"has since improved, delete the rejected entry from the "
-                    f"Uploads → Upload History section first."
-                )
-            else:
+            if count_metrics_for_file(existing["id"]) > 0:
+                when = _fmt_dt(existing.get("uploaded_at"))
+                orig = existing.get("original_filename") or uf.name
                 st.error(
                     f"This file was already uploaded on {when} as '{orig}'. "
                     f"No changes detected."
                 )
-            continue
+                continue
+            # Orphaned entry: a rejected upload, or an active row whose
+            # metrics were deleted (e.g. cleanup SQL). The data is gone,
+            # so auto-clear the stale record and re-process rather than
+            # forcing a trip through Upload History.
+            clear_orphan_upload(existing["id"])
+            st.session_state.pop(f"_parse_{file_hash}", None)
+            st.info(
+                "Re-processing a previously uploaded file with no current "
+                "data."
+            )
 
         # ---- Parse (cache by hash so button reruns don't re-parse) ----
         cache_key = f"_parse_{file_hash}"
