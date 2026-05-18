@@ -1,6 +1,15 @@
 __pycache__/
 *.pyc
+*.pyo
 .DS_Store
-*.db
 .venv/
 venv/
+.claude/
+.streamlit/secrets.toml
+
+# SQLite transient files
+*.db-shm
+*.db-wal
+
+# DB backups — keep main market_data.db tracked
+market_data_backup_*.db
