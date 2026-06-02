@@ -195,6 +195,94 @@ st.markdown(
       /* Section captions on Summary etc. */
       .stMarkdown p strong { color: #0E2A47; }
 
+      /* Portfolio hero strip on Summary page */
+      .sebco-hero {
+        background: linear-gradient(135deg, #0E2A47 0%, #143560 100%);
+        color: #FFFFFF;
+        padding: 14px 22px;
+        border-radius: 6px;
+        display: flex;
+        gap: 18px;
+        justify-content: space-between;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 1px 3px rgba(14, 42, 71, 0.18);
+      }
+      .sebco-hero-chip { flex: 1; display: flex; flex-direction: column; }
+      .sebco-hero-chip .label {
+        font-family: Georgia, serif;
+        font-size: 0.70rem;
+        letter-spacing: 0.16em;
+        color: #C9D2DC;
+        text-transform: uppercase;
+        margin-bottom: 2px;
+      }
+      .sebco-hero-chip .value {
+        font-family: Georgia, serif;
+        font-size: 1.55rem;
+        font-weight: 600;
+        color: #FFFFFF;
+        line-height: 1.1;
+      }
+      .sebco-hero-chip .sub {
+        font-family: Georgia, serif;
+        font-size: 0.72rem;
+        color: #C9D2DC;
+        margin-top: 2px;
+      }
+
+      /* Sebco Position card on Summary page */
+      .sebco-position-card {
+        background: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        border-left: 4px solid #0E2A47;
+        border-radius: 4px;
+        padding: 1rem 1.1rem;
+        box-shadow: 0 1px 2px rgba(14, 42, 71, 0.06);
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+      }
+      .sebco-position-card:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(14, 42, 71, 0.10);
+      }
+      .sebco-position-card .title {
+        font-family: Georgia, serif;
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: #0E2A47;
+        margin-bottom: 0.6rem;
+      }
+      .sebco-position-card .row {
+        display: flex;
+        justify-content: space-between;
+        padding: 6px 0;
+        border-bottom: 1px dashed #E5E7EB;
+        font-family: Georgia, serif;
+        font-size: 0.92rem;
+        color: #1A1A2E;
+      }
+      .sebco-position-card .row:last-of-type { border-bottom: 0; }
+      .sebco-position-card .row .k { color: #6B7280; }
+      .sebco-position-card .row .v { font-weight: 600; color: #0E2A47; }
+
+      .sebco-rent-badge {
+        display: inline-block;
+        background: #F3F4F6;
+        border-radius: 999px;
+        padding: 3px 12px;
+        font-family: Georgia, serif;
+        font-size: 0.78rem;
+        color: #0E2A47;
+        margin-top: 6px;
+      }
+      .sebco-rent-badge.favorable { background: #E7F4EC; color: #1D7A3F; }
+      .sebco-source-note {
+        font-family: Georgia, serif;
+        font-size: 0.78rem;
+        color: #6B7280;
+        font-style: italic;
+        margin: -0.25rem 0 0.5rem 0;
+      }
+
       /* Hide the default Streamlit chrome that looks unfinished */
       #MainMenu { visibility: hidden; }
       footer { visibility: hidden; }
@@ -1443,29 +1531,197 @@ def _latest_consensus(df: pd.DataFrame) -> dict | None:
     return out
 
 
-def _render_overview_kpis(df: pd.DataFrame, market: str) -> list[str]:
-    """Render the row of 4 KPI cards for the selected market. Returns the
-    labels of KPIs that had no market-wide current data so the caller can
-    show a single banner.
+# Sebco portfolio names \u2192 broker-PDF parent market. SD and OC map to
+# themselves; the four submarkets fall back to their parent market when no
+# direct broker breakout exists.
+_LOCATION_TO_PARENT_MARKET = {
+    "Kent Valley": "Seattle",
+    "Marysville": "Seattle",
+    "San Diego": "San Diego",
+    "LA Mid-Counties": "Los Angeles",
+    "LA South Bay": "Los Angeles",
+    "Orange County": "Orange County",
+}
+
+
+def _resolve_location_scope(df: pd.DataFrame, location: str
+                            ) -> tuple[pd.DataFrame, str | None, str]:
+    """Return (scoped_df, source_caption, parent_market) for a Sebco location.
+
+    Direct submarket match wins; otherwise we fall back to the parent
+    market's market-wide rows and surface a caption naming the proxy.
     """
-    mdf = df[df["market"] == market].copy()
-    mdf["metric_period"] = pd.to_datetime(mdf["metric_period"])
-    missing: list[str] = []
+    parent = _LOCATION_TO_PARENT_MARKET.get(location, location)
+    direct = df[df["submarket"] == location]
+    if not direct.empty:
+        return direct, None, parent
+    mkt_wide = df[(df["market"] == parent) & (df["submarket"].isna())]
+    if mkt_wide.empty:
+        # Some broker PDFs label the aggregate as a submarket named
+        # "Market Total" instead of leaving submarket NULL (SD, LA).
+        mkt_wide = df[(df["market"] == parent)
+                      & (df["submarket"] == "Market Total")]
+    if mkt_wide.empty:
+        return df.iloc[0:0], (
+            f"No broker data for {location} or its parent market ({parent})."
+        ), parent
+    if location == parent:
+        return mkt_wide, None, parent
+    return mkt_wide, (
+        f"Source: {parent} market average \u2014 {location} isn't broken out "
+        f"in broker reports."
+    ), parent
+
+
+def _portfolio_hero(portfolio: dict) -> None:
+    """Top-of-page corporate strip with aggregate Sebco portfolio stats."""
+    total_buildings = 0
+    total_sf = 0
+    weighted_num = 0.0
+    weighted_den = 0.0
+    location_count = 0
+    for rec in portfolio.values():
+        bc = int(rec.get("building_count") or 0)
+        sf = int(rec.get("total_sf") or 0)
+        if bc or sf:
+            location_count += 1
+        total_buildings += bc
+        total_sf += sf
+        rent = rec.get("sebco_asking_rent")
+        try:
+            r = float(rent) if rent is not None else None
+        except (TypeError, ValueError):
+            r = None
+        if r is not None and sf > 0:
+            weighted_num += r * sf
+            weighted_den += sf
+
+    avg_rent = (weighted_num / weighted_den) if weighted_den else None
+    rent_disp = f"${avg_rent:.2f}/SF" if avg_rent is not None else "\u2014"
+    if total_sf >= 1_000_000:
+        sf_disp = f"{total_sf / 1_000_000:.2f}M SF"
+    elif total_sf >= 1_000:
+        sf_disp = f"{total_sf / 1_000:.0f}K SF"
+    else:
+        sf_disp = f"{total_sf:,} SF"
+
+    st.markdown(
+        "<div class='sebco-hero'>"
+        f"<div class='sebco-hero-chip'><div class='label'>Buildings</div>"
+        f"<div class='value'>{total_buildings}</div>"
+        f"<div class='sub'>across {location_count} locations</div></div>"
+        f"<div class='sebco-hero-chip'><div class='label'>Total Portfolio SF</div>"
+        f"<div class='value'>{sf_disp}</div></div>"
+        f"<div class='sebco-hero-chip'><div class='label'>Wt. Avg Sebco Rent</div>"
+        f"<div class='value'>{rent_disp}</div>"
+        f"<div class='sub'>NNN, weighted by SF</div></div>"
+        f"<div class='sebco-hero-chip'><div class='label'>Locations Tracked</div>"
+        f"<div class='value'>{location_count}</div></div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sebco_position(name: str, pf_row: dict) -> None:
+    bc = pf_row.get("building_count")
+    sf = int(pf_row.get("total_sf") or 0)
+    rent = pf_row.get("sebco_asking_rent")
+    lt = pf_row.get("lease_type") or ""
+
+    if sf >= 1_000_000:
+        sf_disp = f"{sf / 1_000_000:.2f}M SF"
+    elif sf >= 1_000:
+        sf_disp = f"{sf / 1_000:.0f}K SF"
+    elif sf:
+        sf_disp = f"{sf:,} SF"
+    else:
+        sf_disp = "\u2014"
+
+    try:
+        rent_disp = f"${float(rent):.2f}/SF" if rent else "\u2014"
+    except (TypeError, ValueError):
+        rent_disp = "\u2014"
+
+    st.markdown(
+        "<div class='sebco-position-card'>"
+        f"<div class='title'>Sebco Position \u2014 {name}</div>"
+        f"<div class='row'><span class='k'>Buildings</span>"
+        f"<span class='v'>{bc if bc else '\u2014'}</span></div>"
+        f"<div class='row'><span class='k'>Total SF</span>"
+        f"<span class='v'>{sf_disp}</span></div>"
+        f"<div class='row'><span class='k'>Sebco Asking Rent</span>"
+        f"<span class='v'>{rent_disp}</span></div>"
+        f"<div class='row'><span class='k'>Lease Type</span>"
+        f"<span class='v'>{lt or '\u2014'}</span></div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_rent_badge(sebco_rent, market_rent_row: dict | None) -> None:
+    """Inline "Sebco $1.45 vs Market $1.46 (\u0394 -$0.01)" line under the cards."""
+    if sebco_rent is None or market_rent_row is None:
+        return
+    try:
+        sr = float(sebco_rent)
+    except (TypeError, ValueError):
+        return
+    mr_val = market_rent_row.get("metric_value")
+    if mr_val is None:
+        return
+    mr = float(mr_val)
+    d = sr - mr
+    sign = "+" if d >= 0 else "\u2212"
+    # Favorable for a landlord: Sebco rent >= market rent (capturing the spread).
+    cls = "sebco-rent-badge favorable" if d >= 0 else "sebco-rent-badge"
+    st.markdown(
+        f"<div class='{cls}'>Sebco ${sr:.2f} \u00b7 Market ${mr:.2f} "
+        f"<strong>(\u0394 {sign}${abs(d):.2f})</strong></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_location_kpis(df_all: pd.DataFrame, scope: pd.DataFrame,
+                          parent_market: str) -> dict | None:
+    """Render 4 KPI cards on already-resolved scope. Returns the current
+    asking_rent row (or None) so the caller can build the rent badge.
+    """
     cols = st.columns(4)
+    rent_row: dict | None = None
 
     for col, (mt, label, direction) in zip(cols, _OVERVIEW_KPIS):
         with col:
             if mt == "under_construction":
-                # No market-wide rows exist for under_construction \u2014 aggregate
-                # the latest current-period row per submarket and sum.
-                uc = mdf[
-                    (mdf["metric_type"] == "under_construction")
-                    & (mdf["submarket"].notna())
-                    & (mdf["period_type"] == "current")
+                # Prefer the broker's authoritative aggregate (market-wide
+                # row, or a "Market Total" submarket) before summing.
+                uc_agg = df_all[
+                    (df_all["market"] == parent_market)
+                    & (df_all["metric_type"] == "under_construction")
+                    & (df_all["period_type"] == "current")
+                    & ((df_all["submarket"].isna())
+                       | (df_all["submarket"] == "Market Total"))
+                ]
+                agg_row = _latest_consensus(uc_agg)
+                if agg_row is not None:
+                    st.metric(
+                        label, _format_value(agg_row["metric_value"], "sf"),
+                        help=(
+                            f"Reported aggregate for {parent_market} "
+                            f"(median across brokers when multiple report). "
+                            f"Period: {agg_row['metric_period'].strftime('%b %Y')}."
+                        ),
+                    )
+                    continue
+                uc = df_all[
+                    (df_all["market"] == parent_market)
+                    & (df_all["metric_type"] == "under_construction")
+                    & (df_all["submarket"].notna())
+                    & (df_all["submarket"] != "Market Total")
+                    & (df_all["period_type"] == "current")
                 ]
                 if uc.empty:
                     st.metric(label, "\u2014",
-                              help="No under-construction data for this market.")
+                              help="No under-construction data.")
                     continue
                 latest_per_sub = (
                     uc.sort_values("metric_period")
@@ -1476,21 +1732,19 @@ def _render_overview_kpis(df: pd.DataFrame, market: str) -> list[str]:
                 st.metric(
                     label, _format_value(total_sf, "sf"),
                     help=(
-                        f"Sum across {len(latest_per_sub)} submarkets \u2014 no "
-                        f"market-wide row reported. Period: {period}."
+                        f"Sum across {len(latest_per_sub)} submarkets of "
+                        f"{parent_market}. Period: {period}."
                     ),
                 )
                 continue
 
-            curr = _latest_consensus(mdf[
-                (mdf["metric_type"] == mt)
-                & (mdf["submarket"].isna())
-                & (mdf["period_type"] == "current")
+            curr = _latest_consensus(scope[
+                (scope["metric_type"] == mt)
+                & (scope["period_type"] == "current")
             ])
             if curr is None:
-                missing.append(label)
                 st.metric(label, "\u2014",
-                          help=f"No market-wide {label.lower()} reported.")
+                          help=f"No {label.lower()} data for this location.")
                 continue
 
             value_str = _format_value(curr["metric_value"], curr["unit"])
@@ -1498,11 +1752,11 @@ def _render_overview_kpis(df: pd.DataFrame, market: str) -> list[str]:
                 ll = _lease_label(curr.get("lease_type"))
                 if ll:
                     value_str += f" {ll}"
+                rent_row = curr
 
-            prior = _latest_consensus(mdf[
-                (mdf["metric_type"] == mt)
-                & (mdf["submarket"].isna())
-                & (mdf["period_type"] == "prior_quarter")
+            prior = _latest_consensus(scope[
+                (scope["metric_type"] == mt)
+                & (scope["period_type"] == "prior_quarter")
             ])
             delta_str = None
             delta_color = "off"
@@ -1514,9 +1768,9 @@ def _render_overview_kpis(df: pd.DataFrame, market: str) -> list[str]:
                 delta_color = _delta_color_for(direction, d)
 
             help_parts: list[str] = []
-            glossary = _metric_help(mt)
-            if glossary:
-                help_parts.append(glossary)
+            gloss = _metric_help(mt)
+            if gloss:
+                help_parts.append(gloss)
             help_parts.append(
                 f"Period: {curr['metric_period'].strftime('%b %Y')}"
             )
@@ -1525,125 +1779,167 @@ def _render_overview_kpis(df: pd.DataFrame, market: str) -> list[str]:
 
             st.metric(
                 label, value_str,
-                delta=delta_str,
-                delta_color=delta_color,
+                delta=delta_str, delta_color=delta_color,
                 help=" | ".join(help_parts),
             )
 
-    return missing
+    return rent_row
+
+
+def _render_trend_chart(scope: pd.DataFrame, location: str) -> None:
+    """Interactive Plotly chart with a metric toggle, scoped to a location."""
+    if scope.empty:
+        st.info("No trend data available.")
+        return
+
+    metric_options = [
+        ("vacancy_rate", "Vacancy"),
+        ("asking_rent", "Asking Rent"),
+        ("net_absorption", "Net Absorption"),
+    ]
+    available = [(mt, lab) for mt, lab in metric_options
+                 if (scope["metric_type"] == mt).any()]
+    if not available:
+        st.info("No trendable metrics for this location.")
+        return
+
+    chosen_label = st.radio(
+        "Metric", [lab for _, lab in available],
+        horizontal=True, key=f"trend_metric_{location}",
+    )
+    chosen_mt = next(mt for mt, lab in available if lab == chosen_label)
+
+    series = scope[
+        (scope["metric_type"] == chosen_mt)
+        & (scope["period_type"].isin(
+            ["current", "prior_quarter", "prior_year"]))
+    ].copy()
+    series = series[series.apply(
+        lambda r: _kpi_plausible(r["metric_value"], r["unit"]),
+        axis=1,
+    )]
+    if series.empty:
+        st.info(f"No {chosen_label.lower()} history for {location}.")
+        return
+
+    # Collapse duplicate rows at the same metric_period to their median.
+    series = (
+        series.groupby("metric_period", as_index=False)
+              .agg({"metric_value": "median",
+                    "unit": "first"})
+              .sort_values("metric_period")
+    )
+
+    unit = series["unit"].iloc[0]
+    if unit == "percent":
+        y_title = f"{chosen_label} (%)"
+    elif unit == "dollar_per_sf":
+        y_title = f"{chosen_label} ($/SF/mo)"
+    elif unit == "sf":
+        y_title = f"{chosen_label} (SF)"
+    else:
+        y_title = chosen_label
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=series["metric_period"],
+        y=series["metric_value"],
+        mode="lines+markers" if len(series) >= 2 else "markers",
+        line=dict(color="#0E2A47", width=2.5),
+        marker=dict(color="#0E2A47", size=10,
+                    line=dict(color="#FFFFFF", width=1.5)),
+        hovertemplate="%{x|%b %Y}<br><b>%{y:,.2f}</b><extra></extra>",
+        name=chosen_label,
+    ))
+    fig.update_layout(
+        height=320,
+        margin=dict(l=8, r=8, t=8, b=8),
+        xaxis_title=None,
+        yaxis_title=y_title,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Georgia, serif", color="#1A1A2E"),
+        hoverlabel=dict(bgcolor="#0E2A47",
+                        font=dict(color="#FFFFFF", family="Georgia, serif")),
+        showlegend=False,
+    )
+    fig.update_xaxes(showgrid=False, showline=True, linecolor="#E5E7EB",
+                     tickformat="%b %Y")
+    fig.update_yaxes(showgrid=True, gridcolor="#F3F4F6", showline=False)
+    st.plotly_chart(fig, width="stretch")
 
 
 def page_summary():
-    st.header("Market Summary")
+    st.header("Market Overview \u2014 Sebco Portfolio")
 
     search = _consume_search_filters()
 
+    portfolio = load_sebco_portfolio()
+    if not portfolio:
+        st.warning(
+            "No Sebco portfolio configured. Add holdings on the "
+            "**Portfolio** page first."
+        )
+        return
+
+    _portfolio_hero(portfolio)
+
     rows = get_all_metrics()
     if not rows:
-        st.info("No data yet. Upload some PDFs first.")
+        st.info("No broker data yet. Upload PDFs on the **Upload** page first.")
         return
 
     df = pd.DataFrame(rows)
 
-    current = df[df["period_type"] == "current"].copy()
-    if current.empty:
-        st.info("No current-period data found.")
-        return
+    location_names = [n for n in SEBCO_PORTFOLIO_ORDER if n in portfolio]
+    if not location_names:
+        location_names = list(portfolio.keys())
 
-    markets = sorted(df["market"].dropna().unique())
-    if not markets:
-        st.info("No markets found in the database.")
-        return
-
-    # Honor a market arriving from the smart-search bar.
+    # Honor a smart-search market value if it maps to a portfolio location.
     default_idx = 0
-    if search.get("market") in markets:
-        default_idx = markets.index(search["market"])
+    search_mkt = search.get("market")
+    if search_mkt:
+        for i, name in enumerate(location_names):
+            if (name.lower() == search_mkt.lower()
+                    or _LOCATION_TO_PARENT_MARKET.get(name) == search_mkt):
+                default_idx = i
+                break
 
     sel = st.selectbox(
-        "Market", markets, index=default_idx, key="summary_market",
+        "Sebco Location", location_names, index=default_idx,
+        key="summary_location",
     )
 
-    # KPI row.
-    missing = _render_overview_kpis(df, sel)
-    if missing:
-        st.info(
-            f"No market-wide reports uploaded for **{sel}** for: "
-            + ", ".join(missing)
-            + ". Upload a market-wide PDF to populate these cards."
-        )
+    pf_row = portfolio.get(sel, {})
 
-    st.markdown("---")
+    df_cur_prior = df[df["period_type"].isin(
+        ["current", "prior_quarter", "prior_year"]
+    )].copy()
+    df_cur_prior["metric_period"] = pd.to_datetime(df_cur_prior["metric_period"])
 
-    _render_pdf_export(current)
+    scope, source_label, parent_market = _resolve_location_scope(
+        df_cur_prior, sel,
+    )
 
-    st.subheader("Submarket Detail")
-    st.caption(f"Latest extracted values across {sel}.")
-
-    current["metric_period"] = pd.to_datetime(current["metric_period"])
-    idx = current.groupby(["market", "submarket", "metric_type"])["metric_period"].idxmax()
-    latest = current.loc[idx].copy()
-    latest = latest[latest["market"] == sel]
-
-    if latest.empty:
-        st.info(f"No detail rows for {sel}.")
-        return
-
-    has_warnings = (latest["confidence"] < LOW_CONFIDENCE_THRESHOLD).any()
-
-    mkt_wide = latest[latest["submarket"].isna()]
-    if not mkt_wide.empty:
-        _show_metric_cards(mkt_wide, "Market-wide")
-
-    for sub in sorted(latest["submarket"].dropna().unique()):
-        sub_data = latest[latest["submarket"] == sub]
-        _show_metric_cards(sub_data, sub)
-
-    if has_warnings:
-        st.caption("\u26a0\ufe0f = confidence below 85%. Verify on the Raw Data page.")
-
-
-def _show_metric_cards(df: pd.DataFrame, label: str):
-    """Display metric values as a row of cards."""
-    st.markdown(f"**{label}**")
-    cols = st.columns(min(len(df), 6))
-    for i, (_, row) in enumerate(df.iterrows()):
-        with cols[i % len(cols)]:
-            metric_type = row["metric_type"]
-            metric_display = metric_type.replace("_", " ").title()
-            val = row["metric_value"]
-            unit = row["unit"]
-            confidence = row["confidence"]
-
-            display = _format_value(val, unit)
-            if metric_type == "asking_rent":
-                ll = _lease_label(row.get("lease_type"))
-                if ll:
-                    display += f" {ll}"
-            warn = _warn_suffix(confidence)
-
-            period = row["metric_period"]
-            if pd.notna(period):
-                period_str = pd.to_datetime(period).strftime("%b %Y")
-            else:
-                period_str = ""
-
-            # Build help text: glossary + period
-            help_parts = []
-            glossary = _metric_help(metric_type)
-            if glossary:
-                help_parts.append(glossary)
-            if period_str:
-                help_parts.append(f"Period: {period_str}")
-            if warn:
-                help_parts.append("Confidence below 85% \u2014 verify in Raw Data")
-
-            st.metric(
-                label=metric_display,
-                value=display + warn,
-                help=" | ".join(help_parts) if help_parts else None,
+    left, right = st.columns([1, 1.6])
+    with left:
+        _render_sebco_position(sel, pf_row)
+    with right:
+        if source_label:
+            st.markdown(
+                f"<div class='sebco-source-note'>{source_label}</div>",
+                unsafe_allow_html=True,
             )
+        rent_row = _render_location_kpis(df_cur_prior, scope, parent_market)
+        _render_rent_badge(pf_row.get("sebco_asking_rent"), rent_row)
+
+    st.markdown("&nbsp;", unsafe_allow_html=True)
+    st.subheader("Trend")
+    _render_trend_chart(scope, sel)
+
     st.markdown("---")
+    current = df[df["period_type"] == "current"].copy()
+    _render_pdf_export(current)
 
 
 # ---------------------------------------------------------------------------
