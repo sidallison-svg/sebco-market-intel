@@ -611,9 +611,9 @@ METRIC_KEYWORDS = {
 PAGE_KEYWORDS = {
     "upload": "Upload",
     "import": "Upload",
-    "summary": "Summary",
-    "overview": "Summary",
-    "latest": "Summary",
+    "summary": "Overview",
+    "overview": "Overview",
+    "latest": "Overview",
     "trend": "Trends",
     "chart": "Trends",
     "graph": "Trends",
@@ -675,7 +675,7 @@ def _parse_search(query: str, known_markets: list[str], known_submarkets: list[s
         if result["metric"]:
             result["page"] = "Trends"
         elif result["market"] or result["submarket"]:
-            result["page"] = "Summary"
+            result["page"] = "Overview"
 
     return result
 
@@ -765,8 +765,8 @@ st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Navigation",
-    ["Upload", "Uploads", "Summary", "Market Overview", "Trends",
-     "Comparison", "Raw Data", "Portfolio"],
+    ["Overview", "Snapshot Report", "Trends", "Comparison",
+     "Raw Data", "Upload", "Uploads", "Portfolio"],
     key="nav_page",
 )
 
@@ -1870,7 +1870,7 @@ def _render_trend_chart(scope: pd.DataFrame, location: str) -> None:
 
 
 def page_summary():
-    st.header("Market Overview \u2014 Sebco Portfolio")
+    st.header("Sebco Portfolio Overview")
 
     search = _consume_search_filters()
 
@@ -2554,7 +2554,7 @@ def page_raw_data():
 # ---------------------------------------------------------------------------
 
 def page_market_overview():
-    st.header("Market Overview")
+    st.header("Snapshot Report")
     st.markdown(
         "One-page Sebco portfolio vs. market dashboard. Rows come from "
         "`sebco_portfolio.json`; market figures are pulled live from the "
@@ -2677,19 +2677,19 @@ def page_portfolio():
 # Router
 # ---------------------------------------------------------------------------
 
-if page == "Upload":
-    page_upload()
-elif page == "Summary":
+if page == "Overview":
     page_summary()
-elif page == "Uploads":
-    page_uploads()
+elif page == "Snapshot Report":
+    page_market_overview()
 elif page == "Trends":
     page_trends()
 elif page == "Comparison":
     page_comparison()
-elif page == "Market Overview":
-    page_market_overview()
 elif page == "Raw Data":
     page_raw_data()
+elif page == "Upload":
+    page_upload()
+elif page == "Uploads":
+    page_uploads()
 elif page == "Portfolio":
     page_portfolio()
