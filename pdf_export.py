@@ -91,7 +91,7 @@ def _pick(picked: dict, submarket, *metric_types):
     for mt in metric_types:
         r = picked.get((submarket, mt))
         if r is not None:
-            return r["metric_value"], r["unit"]
+            return r["value"], r["unit"]
     return None, None
 
 
@@ -102,7 +102,7 @@ def _fetch_snapshot_data(market: str, asset_class: str, quarter: str,
     try:
         rows = conn.execute(
             """
-            SELECT submarket, metric_type, metric_value, unit, confidence, id
+            SELECT submarket, metric_type, value, unit, confidence, id
             FROM metrics
             WHERE market = ? AND asset_class = ? AND quarter = ?
               AND period_type = 'current'
@@ -115,7 +115,9 @@ def _fetch_snapshot_data(market: str, asset_class: str, quarter: str,
 
     picked = _dedup_current(rows)
 
-    # 2x2 key metrics — market-wide row (submarket IS NULL) per metric.
+    # 2x2 key metrics — market-wide row (submarket='') per metric. v2 stores
+    # market-wide rows with submarket = '' (not NULL); a missing dimension is
+    # the empty string, never NULL, so the UNIQUE constraint stays honest.
     key_specs = [
         ("Total Vacancy", ("total_vacancy_rate", "vacancy_rate")),
         ("Asking Rent (NNN)", ("asking_rent",)),
@@ -124,12 +126,12 @@ def _fetch_snapshot_data(market: str, asset_class: str, quarter: str,
     ]
     key_metrics = []
     for label, mts in key_specs:
-        val, unit = _pick(picked, None, *mts)
+        val, unit = _pick(picked, "", *mts)
         key_metrics.append({"label": label, "value": _fmt(val, unit)})
 
-    # Submarket table — alphabetical, market-wide (None) excluded.
+    # Submarket table — alphabetical, market-wide ('') excluded.
     sub_names = sorted({
-        sm for (sm, _mt) in picked.keys() if sm is not None
+        sm for (sm, _mt) in picked.keys() if sm
     })
     submarkets = []
     for sm in sub_names:
@@ -341,16 +343,17 @@ def _ov_pick(conn, name: str, metric_type: str, period_type: str):
     """Best DB row for a portfolio name + metric + period.
 
     Matches the name against either market or submarket; prefers
-    market-wide rows, then higher confidence, then most recent.
+    market-wide rows (submarket = '' in v2), then higher confidence,
+    then most recent.
     """
     return conn.execute(
         """
-        SELECT metric_value, unit, lease_type, quarter, metric_period
+        SELECT value, unit, lease_type, quarter, period_date
         FROM metrics
         WHERE metric_type = ? AND period_type = ?
           AND (LOWER(market) = LOWER(?) OR LOWER(submarket) = LOWER(?))
-        ORDER BY (submarket IS NULL) DESC, confidence DESC,
-                 metric_period DESC
+        ORDER BY (submarket = '') DESC, confidence DESC,
+                 period_date DESC
         LIMIT 1
         """,
         (metric_type, period_type, name, name),
@@ -358,10 +361,10 @@ def _ov_pick(conn, name: str, metric_type: str, period_type: str):
 
 
 def _num(row):
-    if row is None or row["metric_value"] is None:
+    if row is None or row["value"] is None:
         return None
     try:
-        return float(row["metric_value"])
+        return float(row["value"])
     except (TypeError, ValueError):
         return None
 
@@ -451,8 +454,8 @@ def _overview_quarter(conn) -> str:
     industrial metric; falls back to today's calendar quarter."""
     row = conn.execute(
         "SELECT quarter FROM metrics WHERE asset_class = 'industrial' "
-        "AND period_type = 'current' AND metric_period IS NOT NULL "
-        "ORDER BY metric_period DESC LIMIT 1"
+        "AND period_type = 'current' AND period_date <> '' "
+        "ORDER BY period_date DESC LIMIT 1"
     ).fetchone()
     if row and row["quarter"]:
         ql = _q_label(row["quarter"])

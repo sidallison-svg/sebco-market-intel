@@ -13,3 +13,4 @@ venv/
 
 # DB backups — keep main market_data.db tracked
 market_data_backup_*.db
+market_data_pre_v2_*.db
