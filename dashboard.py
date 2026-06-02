@@ -1366,11 +1366,177 @@ def _render_pdf_export(current: pd.DataFrame):
             st.caption(f"Ready: `{fname}`")
 
 
+# Top-of-page KPI cards. (metric_type, label, favorable_direction)
+# favorable_direction = "up" | "down" | "neutral" \u2014 controls when the delta
+# arrow turns green (favorable) vs. stays gray (unfavorable / neutral).
+_OVERVIEW_KPIS = [
+    ("vacancy_rate", "Vacancy", "down"),
+    ("asking_rent", "Asking Rent", "up"),
+    ("net_absorption", "Net Absorption", "up"),
+    ("under_construction", "Under Construction", "neutral"),
+]
+
+
+def _format_delta(delta: float, unit: str) -> str:
+    """Signed delta string for st.metric \u2014 leading +/- so the arrow renders."""
+    sign = "+" if delta >= 0 else "-"
+    v = abs(delta)
+    if unit == "percent":
+        return f"{sign}{v:.1f} pp"
+    if unit == "dollar_per_sf":
+        return f"{sign}${v:.2f}"
+    if unit == "sf":
+        if v >= 1_000_000:
+            return f"{sign}{v / 1_000_000:.1f}M SF"
+        if v >= 1_000:
+            return f"{sign}{v / 1_000:.0f}K SF"
+        return f"{sign}{v:,.0f} SF"
+    return f"{sign}{v:,.2f}"
+
+
+def _delta_color_for(direction: str, delta: float) -> str:
+    """Green only on favorable movement; gray ('off') otherwise. Never red."""
+    if direction == "neutral" or delta == 0:
+        return "off"
+    if direction == "up":
+        return "normal" if delta > 0 else "off"
+    # direction == "down" \u2014 lower is better
+    return "inverse" if delta < 0 else "off"
+
+
+# Sanity ranges per unit. The KPI cards must not display obviously-misparsed
+# values (e.g., a row labeled `dollar_per_sf` but holding 1,574,299 — a
+# leasing-activity SF figure that the parser cross-wired). Rows outside these
+# ranges are dropped from the cards' source data.
+_KPI_VALUE_RANGES = {
+    "percent": (0.0, 100.0),
+    "dollar_per_sf": (0.0, 50.0),
+}
+
+
+def _kpi_plausible(value: float | None, unit: str) -> bool:
+    if value is None:
+        return False
+    lo, hi = _KPI_VALUE_RANGES.get(unit, (float("-inf"), float("inf")))
+    return lo <= float(value) <= hi
+
+
+def _latest_consensus(df: pd.DataFrame) -> dict | None:
+    """Latest plausible value for a metric scope. If multiple rows tie on the
+    most-recent metric_period, take the median across them (defensive against
+    duplicate parses); metadata (unit, lease_type) comes from the first tied
+    row.
+    """
+    if df.empty:
+        return None
+    df = df[df.apply(
+        lambda r: _kpi_plausible(r["metric_value"], r["unit"]),
+        axis=1,
+    )]
+    if df.empty:
+        return None
+    max_p = df["metric_period"].max()
+    tied = df[df["metric_period"] == max_p]
+    out = tied.iloc[0].to_dict()
+    out["metric_value"] = float(tied["metric_value"].median())
+    out["metric_period"] = max_p
+    return out
+
+
+def _render_overview_kpis(df: pd.DataFrame, market: str) -> list[str]:
+    """Render the row of 4 KPI cards for the selected market. Returns the
+    labels of KPIs that had no market-wide current data so the caller can
+    show a single banner.
+    """
+    mdf = df[df["market"] == market].copy()
+    mdf["metric_period"] = pd.to_datetime(mdf["metric_period"])
+    missing: list[str] = []
+    cols = st.columns(4)
+
+    for col, (mt, label, direction) in zip(cols, _OVERVIEW_KPIS):
+        with col:
+            if mt == "under_construction":
+                # No market-wide rows exist for under_construction \u2014 aggregate
+                # the latest current-period row per submarket and sum.
+                uc = mdf[
+                    (mdf["metric_type"] == "under_construction")
+                    & (mdf["submarket"].notna())
+                    & (mdf["period_type"] == "current")
+                ]
+                if uc.empty:
+                    st.metric(label, "\u2014",
+                              help="No under-construction data for this market.")
+                    continue
+                latest_per_sub = (
+                    uc.sort_values("metric_period")
+                      .groupby("submarket").tail(1)
+                )
+                total_sf = latest_per_sub["metric_value"].sum()
+                period = latest_per_sub["metric_period"].max().strftime("%b %Y")
+                st.metric(
+                    label, _format_value(total_sf, "sf"),
+                    help=(
+                        f"Sum across {len(latest_per_sub)} submarkets \u2014 no "
+                        f"market-wide row reported. Period: {period}."
+                    ),
+                )
+                continue
+
+            curr = _latest_consensus(mdf[
+                (mdf["metric_type"] == mt)
+                & (mdf["submarket"].isna())
+                & (mdf["period_type"] == "current")
+            ])
+            if curr is None:
+                missing.append(label)
+                st.metric(label, "\u2014",
+                          help=f"No market-wide {label.lower()} reported.")
+                continue
+
+            value_str = _format_value(curr["metric_value"], curr["unit"])
+            if mt == "asking_rent":
+                ll = _lease_label(curr.get("lease_type"))
+                if ll:
+                    value_str += f" {ll}"
+
+            prior = _latest_consensus(mdf[
+                (mdf["metric_type"] == mt)
+                & (mdf["submarket"].isna())
+                & (mdf["period_type"] == "prior_quarter")
+            ])
+            delta_str = None
+            delta_color = "off"
+            if (prior is not None
+                    and prior.get("metric_value") is not None
+                    and curr.get("metric_value") is not None):
+                d = curr["metric_value"] - prior["metric_value"]
+                delta_str = _format_delta(d, curr["unit"])
+                delta_color = _delta_color_for(direction, d)
+
+            help_parts: list[str] = []
+            glossary = _metric_help(mt)
+            if glossary:
+                help_parts.append(glossary)
+            help_parts.append(
+                f"Period: {curr['metric_period'].strftime('%b %Y')}"
+            )
+            if delta_str is None:
+                help_parts.append("No prior-quarter data \u2014 delta omitted.")
+
+            st.metric(
+                label, value_str,
+                delta=delta_str,
+                delta_color=delta_color,
+                help=" | ".join(help_parts),
+            )
+
+    return missing
+
+
 def page_summary():
     st.header("Market Summary")
-    st.markdown("Latest extracted values per market and submarket.")
 
-    _consume_search_filters()  # consume to avoid stale state
+    search = _consume_search_filters()
 
     rows = get_all_metrics()
     if not rows:
@@ -1379,35 +1545,59 @@ def page_summary():
 
     df = pd.DataFrame(rows)
 
-    # Filter to current-period only
     current = df[df["period_type"] == "current"].copy()
     if current.empty:
         st.info("No current-period data found.")
         return
 
-    # For each market/submarket/metric, keep the most recent metric_period
+    markets = sorted(df["market"].dropna().unique())
+    if not markets:
+        st.info("No markets found in the database.")
+        return
+
+    # Honor a market arriving from the smart-search bar.
+    default_idx = 0
+    if search.get("market") in markets:
+        default_idx = markets.index(search["market"])
+
+    sel = st.selectbox(
+        "Market", markets, index=default_idx, key="summary_market",
+    )
+
+    # KPI row.
+    missing = _render_overview_kpis(df, sel)
+    if missing:
+        st.info(
+            f"No market-wide reports uploaded for **{sel}** for: "
+            + ", ".join(missing)
+            + ". Upload a market-wide PDF to populate these cards."
+        )
+
+    st.markdown("---")
+
     _render_pdf_export(current)
+
+    st.subheader("Submarket Detail")
+    st.caption(f"Latest extracted values across {sel}.")
 
     current["metric_period"] = pd.to_datetime(current["metric_period"])
     idx = current.groupby(["market", "submarket", "metric_type"])["metric_period"].idxmax()
     latest = current.loc[idx].copy()
+    latest = latest[latest["market"] == sel]
+
+    if latest.empty:
+        st.info(f"No detail rows for {sel}.")
+        return
 
     has_warnings = (latest["confidence"] < LOW_CONFIDENCE_THRESHOLD).any()
 
-    # Pivot for display
-    for market in latest["market"].unique():
-        st.subheader(market)
-        mkt_data = latest[latest["market"] == market]
+    mkt_wide = latest[latest["submarket"].isna()]
+    if not mkt_wide.empty:
+        _show_metric_cards(mkt_wide, "Market-wide")
 
-        # Market-wide data
-        mkt_wide = mkt_data[mkt_data["submarket"].isna()]
-        if not mkt_wide.empty:
-            _show_metric_cards(mkt_wide, "Market-wide")
-
-        # Per-submarket
-        for sub in sorted(mkt_data["submarket"].dropna().unique()):
-            sub_data = mkt_data[mkt_data["submarket"] == sub]
-            _show_metric_cards(sub_data, sub)
+    for sub in sorted(latest["submarket"].dropna().unique()):
+        sub_data = latest[latest["submarket"] == sub]
+        _show_metric_cards(sub_data, sub)
 
     if has_warnings:
         st.caption("\u26a0\ufe0f = confidence below 85%. Verify on the Raw Data page.")
