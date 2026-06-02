@@ -9,6 +9,7 @@ Pages:
   5. Raw Data - searchable table with CSV export and manual editing
 """
 
+import base64
 import getpass
 import hashlib
 import io
@@ -21,7 +22,6 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 
 from config import get_db_path
 from database import (
@@ -2568,7 +2568,13 @@ def page_market_overview():
         st.error(f"Could not build the Market Overview preview: {e}")
         return
 
-    components.html(html, height=620, scrolling=True)
+    # Render the full WeasyPrint HTML doc inside a sandboxed iframe so the
+    # template's global styles can't leak into the Streamlit page.
+    data_uri = (
+        "data:text/html;base64,"
+        + base64.b64encode(html.encode("utf-8")).decode("ascii")
+    )
+    st.iframe(data_uri, height=620)
 
     st.markdown("---")
     if st.button("Export PDF", type="primary", key="ov_export"):
