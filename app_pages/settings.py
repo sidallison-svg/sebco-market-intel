@@ -16,7 +16,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from utils import load_sebco_portfolio, save_sebco_portfolio
+from utils import (
+    is_using_local_portfolio, load_sebco_portfolio, save_sebco_portfolio,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -30,11 +32,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.caption(
-    "Edits are written to `sebco_portfolio.json`. On Streamlit Cloud the "
-    "filesystem is ephemeral, so cloud edits don't persist past a restart "
-    "— do real edits locally and commit the file."
-)
+# Show which file is currently in effect so principals know whether they're
+# looking at real numbers (local .local override) or the public placeholder
+# (default; what the cloud deploy renders).
+if is_using_local_portfolio():
+    st.caption(
+        "Loaded from `sebco_portfolio.local.json` — gitignored local "
+        "override with your real numbers. Saves go back to the same file."
+    )
+else:
+    st.caption(
+        "Loaded from `sebco_portfolio.json` — the committed placeholder "
+        "set (safe for the public cloud). Saving from this page writes "
+        "to `sebco_portfolio.local.json` (gitignored), creating a local "
+        "snapshot that takes precedence on subsequent loads. The "
+        "placeholder file is never overwritten from this page."
+    )
 
 
 # ---------------------------------------------------------------------------

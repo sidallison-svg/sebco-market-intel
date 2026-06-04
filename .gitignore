@@ -14,3 +14,10 @@ venv/
 # DB backups — keep main market_data.db tracked
 market_data_backup_*.db
 market_data_pre_v2_*.db
+
+# Local-only overrides. sebco_portfolio.json is committed with placeholder
+# values that are safe for the public cloud deploy; sebco_portfolio.local.json
+# is the gitignored local snapshot with real Sebco numbers and must not
+# escape the local machine. Any *.local.json file follows the same convention.
+sebco_portfolio.local.json
+*.local.json

@@ -6,9 +6,9 @@ import json
 import os
 import re
 
-_PORTFOLIO_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "sebco_portfolio.json"
-)
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_PORTFOLIO_FILE = os.path.join(_DIR, "sebco_portfolio.json")
+_PORTFOLIO_LOCAL_FILE = os.path.join(_DIR, "sebco_portfolio.local.json")
 
 # Canonical display order for the portfolio / Market Overview report.
 SEBCO_PORTFOLIO_ORDER = [
@@ -17,25 +17,54 @@ SEBCO_PORTFOLIO_ORDER = [
 ]
 
 
-def load_sebco_portfolio() -> dict:
-    """Return the Sebco internal portfolio dict.
-
-    Returns {} (never raises) if the config file is missing or unreadable
-    so the dashboard degrades gracefully instead of crashing.
-    """
+def _read_json(path: str) -> dict:
+    """Load a JSON file and return a dict (or {} on any failure)."""
     try:
-        with open(_PORTFOLIO_FILE, "r") as f:
+        with open(path, "r") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
 
 
+def load_sebco_portfolio() -> dict:
+    """Return the Sebco portfolio dict.
+
+    Reads from `sebco_portfolio.local.json` if it exists (gitignored;
+    local-only snapshot with real numbers), otherwise falls back to
+    `sebco_portfolio.json` (committed placeholder, safe for the public
+    cloud deploy). The local file is treated as a full snapshot — when
+    present it replaces, not merges with, the base file.
+
+    Returns {} (never raises) if neither file is loadable so the
+    dashboard degrades gracefully instead of crashing.
+    """
+    if os.path.exists(_PORTFOLIO_LOCAL_FILE):
+        return _read_json(_PORTFOLIO_LOCAL_FILE)
+    return _read_json(_PORTFOLIO_FILE)
+
+
 def save_sebco_portfolio(data: dict) -> None:
-    """Persist the portfolio dict back to sebco_portfolio.json."""
-    with open(_PORTFOLIO_FILE, "w") as f:
+    """Always writes to `sebco_portfolio.local.json` (gitignored).
+
+    Settings-page edits never overwrite the public placeholder file,
+    even on the cloud deploy — that prevents an accidental save (from
+    anyone who has access to the deployment) from leaking real numbers
+    into git history if the .local file ever gets staged by mistake.
+
+    To edit the public placeholder set, edit sebco_portfolio.json by
+    hand and commit.
+    """
+    with open(_PORTFOLIO_LOCAL_FILE, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+
+
+def is_using_local_portfolio() -> bool:
+    """True if the load_sebco_portfolio() returns the .local override
+    rather than the public placeholder. Used by the Settings page to
+    show which file is currently in effect."""
+    return os.path.exists(_PORTFOLIO_LOCAL_FILE)
 
 # Anchored on "-market-research-" so we can pick the asset class out of the
 # prefix and the market slug + year + quarter out of the suffix.

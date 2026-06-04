@@ -36,6 +36,21 @@ A browser window will open at http://localhost:8501 with the dashboard.
 3. Review the extracted preview and click **Save to database**
 4. Use Pulse / Compare / Trends to explore the data
 
+## Portfolio Configuration (Public vs Local)
+
+Sebco's internal portfolio numbers (building counts, in-place rents, lease types) live in two files:
+
+- **`sebco_portfolio.json`** — tracked in git, committed with **placeholder** values that are safe for the public cloud deployment. Treat this as the "what the world sees" file.
+- **`sebco_portfolio.local.json`** — **gitignored** local override with real Sebco numbers. Treat this as the "what the principals actually see when running locally" file.
+
+`load_sebco_portfolio()` reads the `.local` file when it exists and falls back to the public placeholder otherwise. The Settings page in the dashboard **always writes to the `.local` file** — saving from Settings will never overwrite the public placeholder, even on the cloud deploy. This prevents an accidental edit from leaking real numbers into git history.
+
+To bootstrap your local override the first time:
+- Open the dashboard locally → Settings → edit values → Save. A `sebco_portfolio.local.json` file appears next to the public one.
+
+To update the public placeholders (rare):
+- Edit `sebco_portfolio.json` directly in your editor and `git commit` the change.
+
 ## Sharing the Database via OneDrive
 
 By default, data is stored locally in `market_data.db`. To share across computers:
