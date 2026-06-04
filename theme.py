@@ -207,43 +207,53 @@ def _base_css() -> str:
     .badge--stale::before  {{ background: {p['warning']}; }}
     .badge--missing::before {{ background: {p['negative']}; }}
 
-    /* Top tab bar (rendered by app.py via st.markdown) */
-    .topnav {{
-        display: flex;
-        align-items: center;
-        gap: {SPACE['1']};
-        padding: {SPACE['3']} 0 {SPACE['4']};
-        border-bottom: 1px solid {p['border']};
-        margin-bottom: {SPACE['8']};
-    }}
-    .topnav__brand {{
+    /* Top tab bar: brand text + st.page_link components + horizontal rule.
+       Streamlit renders each st.* call inside its own element-container,
+       so we can't wrap them in a CSS-meaningful parent div from Python —
+       instead each piece is styled by class/data-testid.
+    */
+    .topnav-brand {{
         font-weight: 600;
         font-size: {TYPE_SCALE['lg']};
         color: {p['text_primary']};
-        margin-right: {SPACE['8']};
+        letter-spacing: -0.01em;
+        margin-bottom: {SPACE['1']};
+    }}
+    .topnav-rule {{
+        border: none;
+        border-bottom: 1px solid {p['border']};
+        margin: {SPACE['2']} 0 {SPACE['6']} 0;
     }}
 
-    /* Style the radio-buttons-as-tabs we use inside the topnav. Streamlit
-       renders st.radio as labeled divs; we restyle them to look like tabs. */
-    .topnav div[role="radiogroup"] {{
-        display: flex;
-        gap: {SPACE['1']};
-    }}
-    .topnav div[role="radiogroup"] label {{
-        cursor: pointer;
+    /* st.page_link rendered links — restyled to look like tabs.
+       Streamlit uses data-testid='stPageLink-NavLink' in 1.36+. */
+    [data-testid="stPageLink-NavLink"],
+    a[data-testid="stPageLink-NavLink"] {{
+        display: inline-flex;
+        align-items: center;
         padding: {SPACE['2']} {SPACE['4']};
         border-radius: {RADIUS['sm']};
         font-size: {TYPE_SCALE['sm']};
         font-weight: 500;
-        color: {p['text_secondary']};
+        color: {p['text_secondary']} !important;
+        text-decoration: none !important;
+        background: transparent;
+        border: 1px solid transparent;
         transition: background 80ms ease, color 80ms ease;
+        width: fit-content;
     }}
-    .topnav div[role="radiogroup"] label:hover {{
+    [data-testid="stPageLink-NavLink"]:hover {{
         background: {p['surface']};
-        color: {p['text_primary']};
+        color: {p['text_primary']} !important;
     }}
-    .topnav div[role="radiogroup"] label[data-baseweb="radio"] > div:first-child {{
-        display: none;   /* hide the radio circle */
+    /* Streamlit marks the active page link with aria-current="page". */
+    [data-testid="stPageLink-NavLink"][aria-current="page"] {{
+        color: {p['accent']} !important;
+        background: {p['accent_soft']};
+    }}
+    /* Hide the small icon the page_link wants to draw next to the label. */
+    [data-testid="stPageLink-NavLink"] svg {{
+        display: none;
     }}
 
     /* Tone down Streamlit's built-in metric so we don't accidentally
