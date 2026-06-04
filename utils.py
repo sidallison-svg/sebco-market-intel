@@ -5,9 +5,6 @@ Shared utilities for Sebco Market Intel.
 import json
 import os
 import re
-from datetime import datetime
-
-import pandas as pd
 
 _PORTFOLIO_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sebco_portfolio.json"
@@ -39,42 +36,6 @@ def save_sebco_portfolio(data: dict) -> None:
     with open(_PORTFOLIO_FILE, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
-
-# Spec column set for CSV exports. Internal IDs, source_file_id and raw_text
-# are deliberately excluded; confidence is appended for Raw Data only.
-CSV_BASE_COLS = [
-    "market", "submarket", "asset_class", "metric_type", "metric_value",
-    "unit", "quarter", "metric_period", "source", "parser_strategy",
-]
-
-
-def _slug(value) -> str:
-    s = str(value if value is not None else "").lower().strip()
-    s = re.sub(r"[^a-z0-9]+", "_", s)
-    return s.strip("_")
-
-
-def build_csv_export(df: pd.DataFrame, page: str, filter_bits: list,
-                     include_confidence: bool = False,
-                     today: str | None = None) -> tuple[str, str]:
-    """Return (filename, csv_text) for an already-filtered frame.
-
-    Filename: sebco_{page}_{filters}_{YYYY-MM-DD}.csv
-    """
-    cols = list(CSV_BASE_COLS) + (["confidence"] if include_confidence else [])
-    out = df.copy()
-    for c in cols:
-        if c not in out.columns:
-            out[c] = None
-    out = out[cols]
-
-    slugged = [_slug(b) for b in filter_bits
-               if b not in (None, "", "(all)") and _slug(b)]
-    parts = "_".join(slugged) if slugged else "all"
-    date = today or datetime.now().strftime("%Y-%m-%d")
-    fname = f"sebco_{page}_{parts}_{date}.csv"
-    return fname, out.to_csv(index=False)
-
 
 # Anchored on "-market-research-" so we can pick the asset class out of the
 # prefix and the market slug + year + quarter out of the suffix.

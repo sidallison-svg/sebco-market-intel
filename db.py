@@ -5,11 +5,11 @@ Single `metrics` table; every ingest path (Kidder, CBRE, Voit, JLL) writes
 the same shape via `upsert_metrics()`. Auxiliary tables (uploaded_files,
 rejected_records, saved_views) are unchanged from the v1 layout.
 
-Field name choices intentionally follow the v2 spec:
-    value, period_date, source_series, ingested_at
-The v1 names (metric_value, metric_period, parser_strategy, date_ingested)
-live on as SELECT aliases in helpers the dashboard already calls, so the
-frontend keeps working without changes.
+Field names follow the v2 spec: value, period_date, source_series,
+ingested_at. The parsers in pdf_parser.py still emit v1 names
+(metric_value, metric_period, parser_strategy, date_ingested) — those get
+translated on the way in by upsert_metrics via _V1_TO_V2, so the
+parser modules don't have to change.
 
 Why submarket / lease_type / source_series default to '' (not NULL):
 SQLite treats NULLs as distinct in UNIQUE constraints, so two rows with
@@ -152,35 +152,30 @@ RETRY_DELAY = 0.5  # seconds
 
 
 # ---------------------------------------------------------------------------
-# SELECT aliasing: gives dashboard code the v1 column names it expects.
-# Keeps the rewrite invisible to callers that still say r["metric_value"].
+# Column list for the metric-row SELECTs. Listed explicitly (vs. SELECT *) so
+# the query result schema is stable when columns get added/reordered later.
 # ---------------------------------------------------------------------------
 
-_METRICS_COMPAT_COLS = """
+_METRICS_COLS = """
     id,
     source,
     source_page,
     report_date,
     quarter,
-    period_date AS metric_period,
     period_date,
     period_type,
     market,
     submarket,
     asset_class,
     metric_type,
-    value AS metric_value,
     value,
     unit,
     confidence,
     raw_text,
-    source_series AS parser_strategy,
     source_series,
     lease_type,
     frequency,
     is_estimate,
-    NULL AS extraction_notes,
-    ingested_at AS date_ingested,
     ingested_at,
     last_edited_by,
     last_edited_at,
@@ -873,7 +868,7 @@ def get_metrics_for_source(source: str,
     conn = _get_connection(db_path)
     try:
         rows = conn.execute(
-            f"SELECT {_METRICS_COMPAT_COLS} FROM metrics WHERE source = ? "
+            f"SELECT {_METRICS_COLS} FROM metrics WHERE source = ? "
             "ORDER BY submarket, metric_type, period_date",
             (source,),
         ).fetchall()
@@ -887,7 +882,7 @@ def get_all_metrics(db_path: str | None = None) -> list[dict]:
     conn = _get_connection(db_path)
     try:
         rows = conn.execute(
-            f"SELECT {_METRICS_COMPAT_COLS} FROM metrics "
+            f"SELECT {_METRICS_COLS} FROM metrics "
             "ORDER BY period_date DESC, market, submarket"
         ).fetchall()
         return [dict(r) for r in rows]
@@ -917,9 +912,6 @@ def update_metric(metric_id: int, metric_value: float,
 @_retry
 def get_distinct_values(column: str,
                         db_path: str | None = None) -> list[str]:
-    # Dashboard passes v1 column names; map them to v2 here so the
-    # frontend doesn't need to change.
-    column = _V1_TO_V2.get(column, column)
     conn = _get_connection(db_path)
     try:
         rows = conn.execute(
