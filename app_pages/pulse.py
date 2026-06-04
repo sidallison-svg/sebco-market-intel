@@ -152,16 +152,20 @@ def _card_html(market: str, quarter_label: str,
                sebco_rent: float | None,
                has_data: bool) -> str:
     """Render the static portion of a market card as one HTML block.
-    The sparkline + page_link render separately (Streamlit components
-    can't be embedded inside an arbitrary HTML string)."""
+
+    Returns a single-line HTML string. Multi-line/indented HTML hits
+    Streamlit's CommonMark parser, which treats lines indented by 4+
+    spaces as a code block — even with unsafe_allow_html=True the inner
+    content would render as literal text. Keeping the whole card on
+    one line side-steps that entirely.
+    """
     p = PALETTE
     if not has_data:
         body = (
-            f'<div style="color:{p["text_tertiary"]};font-size:'
-            f'{TYPE_SCALE["sm"]};padding:{SPACE["6"]} 0;">'
+            f'<div style="color:{p["text_tertiary"]};'
+            f'font-size:{TYPE_SCALE["sm"]};padding:{SPACE["6"]} 0;">'
             'No reports uploaded yet for this market. '
-            'Visit Library to add one.'
-            '</div>'
+            'Visit Library to add one.</div>'
         )
     else:
         vac_txt = _fmt_vacancy(vac)
@@ -178,62 +182,59 @@ def _card_html(market: str, quarter_label: str,
                 f'<div style="font-size:{TYPE_SCALE["xs"]};'
                 f'color:{p["text_tertiary"]};margin-top:{SPACE["1"]};">'
                 f'Sebco ${sebco_rent:.2f} '
-                f'({sign}{abs(pct):.0f}% vs market)'
-                f'</div>'
+                f'({sign}{abs(pct):.0f}% vs market)</div>'
             )
 
-        body = f'''
-        <div style="display:flex;gap:{SPACE["6"]};margin-top:{SPACE["4"]};">
-          <div style="flex:1;">
-            <div style="font-size:{TYPE_SCALE["xs"]};font-weight:500;
-                 color:{p["text_secondary"]};text-transform:uppercase;
-                 letter-spacing:0.04em;margin-bottom:{SPACE["1"]};">
-              Vacancy
-            </div>
-            <div style="font-size:{TYPE_SCALE["2xl"]};font-weight:600;
-                 color:{p["text_primary"]};line-height:1.1;">
-              {html.escape(vac_txt)}
-            </div>
-            <div style="font-size:{TYPE_SCALE["xs"]};font-weight:500;
-                 color:{_DELTA_COLOR[vac_tone]};margin-top:{SPACE["1"]};">
-              {html.escape(vac_dtxt) if vac_dtxt else '&nbsp;'}
-            </div>
-          </div>
-          <div style="flex:1;">
-            <div style="font-size:{TYPE_SCALE["xs"]};font-weight:500;
-                 color:{p["text_secondary"]};text-transform:uppercase;
-                 letter-spacing:0.04em;margin-bottom:{SPACE["1"]};">
-              Asking Rent
-            </div>
-            <div style="font-size:{TYPE_SCALE["2xl"]};font-weight:600;
-                 color:{p["text_primary"]};line-height:1.1;">
-              {html.escape(rent_txt)}
-            </div>
-            <div style="font-size:{TYPE_SCALE["xs"]};font-weight:500;
-                 color:{_DELTA_COLOR[rent_tone]};margin-top:{SPACE["1"]};">
-              {html.escape(rent_dtxt) if rent_dtxt else '&nbsp;'}
-            </div>
-            {sebco_line}
-          </div>
-        </div>
-        '''
+        def _cell(label: str, value: str, delta_txt: str, delta_tone: str,
+                  trailing: str = "") -> str:
+            label_div = (
+                f'<div style="font-size:{TYPE_SCALE["xs"]};'
+                f'font-weight:500;color:{p["text_secondary"]};'
+                f'text-transform:uppercase;letter-spacing:0.04em;'
+                f'margin-bottom:{SPACE["1"]};">{label}</div>'
+            )
+            value_div = (
+                f'<div style="font-size:{TYPE_SCALE["2xl"]};'
+                f'font-weight:600;color:{p["text_primary"]};'
+                f'line-height:1.1;">{html.escape(value)}</div>'
+            )
+            delta_div = (
+                f'<div style="font-size:{TYPE_SCALE["xs"]};'
+                f'font-weight:500;color:{_DELTA_COLOR[delta_tone]};'
+                f'margin-top:{SPACE["1"]};">'
+                f'{html.escape(delta_txt) if delta_txt else "&nbsp;"}</div>'
+            )
+            return (
+                f'<div style="flex:1;">{label_div}{value_div}{delta_div}'
+                f'{trailing}</div>'
+            )
+
+        body = (
+            f'<div style="display:flex;gap:{SPACE["6"]};'
+            f'margin-top:{SPACE["4"]};">'
+            + _cell("Vacancy", vac_txt, vac_dtxt, vac_tone)
+            + _cell("Asking Rent", rent_txt, rent_dtxt, rent_tone,
+                    trailing=sebco_line)
+            + '</div>'
+        )
 
     quarter_chip = (
-        f'<span style="font-size:{TYPE_SCALE["xs"]};color:{p["text_tertiary"]};'
-        f'margin-left:{SPACE["2"]};">{html.escape(quarter_label)}</span>'
+        f'<span style="font-size:{TYPE_SCALE["xs"]};'
+        f'color:{p["text_tertiary"]};margin-left:{SPACE["2"]};">'
+        f'{html.escape(quarter_label)}</span>'
         if quarter_label else ""
     )
-    return f'''
-    <div style="background:{p["bg"]};border:1px solid {p["border"]};
-         border-radius:{RADIUS["md"]};padding:{SPACE["5"]} {SPACE["5"]};
-         box-shadow:{SHADOW["card"]};min-height:240px;">
-      <div style="font-size:{TYPE_SCALE["lg"]};font-weight:600;
-           color:{p["text_primary"]};letter-spacing:-0.01em;">
-        {html.escape(market)}{quarter_chip}
-      </div>
-      {body}
-    </div>
-    '''
+    title_div = (
+        f'<div style="font-size:{TYPE_SCALE["lg"]};font-weight:600;'
+        f'color:{p["text_primary"]};letter-spacing:-0.01em;">'
+        f'{html.escape(market)}{quarter_chip}</div>'
+    )
+    return (
+        f'<div style="background:{p["bg"]};border:1px solid {p["border"]};'
+        f'border-radius:{RADIUS["md"]};padding:{SPACE["5"]} {SPACE["5"]};'
+        f'box-shadow:{SHADOW["card"]};min-height:240px;">'
+        + title_div + body + '</div>'
+    )
 
 
 def _render_card(market: str, col) -> None:

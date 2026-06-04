@@ -92,17 +92,22 @@ def _render_upload_section() -> None:
     Parse is cached in st.session_state keyed by file hash so the Save
     button (which re-runs the script) doesn't re-parse the PDF.
     """
-    with st.expander("Upload a report", expanded=False):
-        st.markdown(
-            "PDF reports from Kidder Mathews, CBRE, Voit, or JLL. "
-            "Identical files are blocked; a different file covering the "
-            "same market + quarter prompts a Replace / Cancel."
-        )
+    st.markdown("## Upload a report")
+    st.markdown(
+        "Supported publishers: **Kidder Mathews**, **CBRE**, "
+        "**Voit Real Estate Services**, **JLL**. Quarterly market reports "
+        "in PDF form — other publishers and other formats (PowerPoint, "
+        "scans, etc.) aren't supported and will be flagged as rejected. "
+        "Identical files are blocked; a different file covering the same "
+        "market + quarter prompts a Replace / Cancel."
+    )
+    with st.expander("Drop PDFs here", expanded=False):
         uploaded = st.file_uploader(
             "Drop one or more PDFs",
             type=["pdf"],
             accept_multiple_files=True,
             key="lib_uploader",
+            label_visibility="collapsed",
         )
         if not uploaded:
             return

@@ -188,15 +188,35 @@ if df_chart.empty:
                f"({sel_ac}).")
     st.stop()
 
+
+def _quarter_label_from_date(d) -> str:
+    """'2026-03-31' -> '1Q 2026'."""
+    s = str(d)[:10]
+    if len(s) < 7:
+        return s
+    yr, mo = s[:4], s[5:7]
+    q = {"03": "1Q", "06": "2Q", "09": "3Q", "12": "4Q"}.get(mo)
+    return f"{q} {yr}" if q else s
+
+
+# Limit to the most recent 4 quarters of data — past that the chart gets
+# cluttered and Sebco principals are looking at trajectory, not history.
+df_chart["quarter_label"] = df_chart["period_date"].apply(
+    _quarter_label_from_date)
+recent_qs_sorted = (df_chart[["period_date", "quarter_label"]]
+                    .drop_duplicates()
+                    .sort_values("period_date")
+                    .tail(4))
+keep_labels = recent_qs_sorted["quarter_label"].tolist()
+df_chart = df_chart[df_chart["quarter_label"].isin(keep_labels)]
+
 # Decide which submarkets to draw
 if show_submarkets:
-    # All non-empty submarkets, plus the market total if present
     series_keys = sorted(df_chart["submarket"].fillna("").unique().tolist(),
                          key=lambda s: ("" if s == "" else s))
     series_labels = {s: ("Market total" if s == "" else s)
                      for s in series_keys}
 else:
-    # Market-wide only — fall back to "first submarket" if no market total
     if (df_chart["submarket"] == "").any():
         series_keys = [""]
     else:
@@ -216,7 +236,7 @@ for i, sk in enumerate(series_keys):
     if sub_df.empty:
         continue
     fig.add_trace(go.Scatter(
-        x=sub_df["period_date"],
+        x=sub_df["quarter_label"],
         y=sub_df["value"],
         mode="lines+markers",
         name=series_labels[sk],
@@ -224,10 +244,8 @@ for i, sk in enumerate(series_keys):
         marker={"size": 7},
         hovertemplate=(
             "<b>%{fullData.name}</b><br>"
-            "%{x|%b %Y}<br>"
-            "%{y} " + (unit if unit not in ("dollar_per_sf", "percent",
-                                            "sf", "number") else "")
-            + "<extra></extra>"
+            "%{x}<br>"
+            "%{y}<extra></extra>"
         ),
     ))
 
@@ -248,6 +266,8 @@ fig.update_layout(
     showlegend=show_submarkets,
     xaxis_title=None,
     yaxis_title=f"{_metric_label(sel_metric)} ({unit})",
+    xaxis={"type": "category", "categoryorder": "array",
+           "categoryarray": keep_labels},
 )
 if tickfmt:
     fig.update_yaxes(tickformat=tickfmt)
