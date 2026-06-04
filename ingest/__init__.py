@@ -23,6 +23,7 @@ import pdfplumber
 
 from pdf_parser import _detect_provider, get_warnings
 
+from .andover import ingest_andover
 from .cbre import ingest_cbre
 from .jll import ingest_jll
 from .kidder import ingest_kidder
@@ -34,6 +35,7 @@ _INGESTORS = {
     "voit": ingest_voit,
     "jll": ingest_jll,
     "kidder": ingest_kidder,
+    "andover": ingest_andover,
 }
 
 
@@ -62,4 +64,5 @@ __all__ = [
     "ingest_voit",
     "ingest_jll",
     "ingest_kidder",
+    "ingest_andover",
 ]

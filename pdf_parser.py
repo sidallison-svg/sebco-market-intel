@@ -1267,8 +1267,16 @@ def _parse_dual_breakdown(page, header: dict, source: str,
 
 
 def _detect_provider(pages: list[str]) -> str:
-    """Identify the report publisher from footer/branding text."""
+    """Identify the report publisher from footer/branding text.
+
+    Note on Andover: the firm's brand text ("Andover", "CORFAC") sits in
+    logo images that pdfplumber doesn't extract, so we key on the
+    publisher URL `andoverco.com` which appears in the page-1 footer of
+    the verified Q2 2025 sample.
+    """
     joined = "\n".join(pages).upper()
+    if "ANDOVERCO.COM" in joined:
+        return "andover"
     if "CBRE RESEARCH" in joined:
         return "cbre"
     if "VOIT REAL ESTATE SERVICES" in joined:
@@ -1390,7 +1398,31 @@ def _cbre_header(pages: list[str], filepath: str) -> dict:
 
 def _parse_cbre(pdf, pages: list[str], source: str,
                 filepath: str) -> list[dict]:
-    """Parse the CBRE 'Market Statistics by Submarket' grid (Figure 9)."""
+    """CBRE dispatcher. Picks the new Orange County Industrial format
+    (Figure 6 submarket grid + Figure 9 city-detail grid; verified
+    against the Q4 2025 file) when present, otherwise falls through
+    to the older 'Market Statistics by Submarket' single-table layout.
+    """
+    full_up = "\n".join(pages).upper()
+    new_oc_format = (
+        "ORANGE COUNTY INDUSTRIAL" in full_up
+        and "FIGURE 6: MARKET STATISTICS" in full_up
+        and len(pdf.pages) >= 7
+    )
+    if new_oc_format:
+        recs = _parse_cbre_new_oc(pdf, pages, source, filepath)
+        if recs:
+            return recs
+        # If the new-format extraction came back empty, log and fall back
+        # rather than silently dropping data.
+        _warn(f"{source}: CBRE — new OC format detected but no rows "
+              f"parsed; falling back to classic single-table layout.")
+    return _parse_cbre_classic(pdf, pages, source, filepath)
+
+
+def _parse_cbre_classic(pdf, pages: list[str], source: str,
+                        filepath: str) -> list[dict]:
+    """Original CBRE parser: single 'Market Statistics by Submarket' grid."""
     header = _cbre_header(pages, filepath)
     if not header["quarter"]:
         _warn(f"{source}: CBRE — could not detect quarter; skipping.")
@@ -1449,6 +1481,153 @@ def _parse_cbre(pdf, pages: list[str], source: str,
     if not records:
         _warn(f"{source}: CBRE — submarket table located but no data rows "
               f"parsed (column layout may need tuning for this report).")
+    return records
+
+
+# ---------------------------------------------------------------------------
+# CBRE new OC Industrial format (Q4 2025 verified):
+#   Figure 6 page-4 'Market Statistics' — 4 submarkets + total
+#   Figure 9 page-7 'Market Area Overview' — 42 cities + section totals
+#
+# Both come out cleanly via pdfplumber's find_tables(); we read them by
+# fixed page index because the column layout is heavily templated and the
+# verified spec calls for those exact pages. If the publisher renumbers
+# pages we fall through to _parse_cbre_classic (the dispatcher above).
+# ---------------------------------------------------------------------------
+
+# Column order for Figure 6 (submarket-level summary). Index 0 is the
+# submarket name; remaining columns map to (metric_type, unit, lease_type).
+_CBRE_FIG6_COLS = [
+    ("total_inventory",          "sf",            ""),
+    ("total_vacancy_rate",       "percent",       ""),
+    ("total_availability_rate",  "percent",       ""),
+    ("net_absorption",           "sf",            ""),
+    ("gross_absorption",         "sf",            ""),
+    ("under_construction",       "sf",            ""),
+    ("deliveries",               "sf",            ""),
+    ("asking_rent",              "dollar_per_sf", "NNN"),
+]
+
+# Column order for Figure 9 (city-level detail). Index 0 is the city name;
+# remaining columns map to (metric_type, unit, lease_type).
+_CBRE_FIG9_COLS = [
+    ("building_count",           "number",  ""),
+    ("total_inventory",          "sf",      ""),
+    ("under_construction",       "sf",      ""),
+    ("sales_volume",             "sf",      ""),
+    ("leasing_activity",         "sf",      ""),
+    ("gross_absorption",         "sf",      ""),
+    ("net_absorption",           "sf",      ""),
+    ("vacant_sf",                "sf",      ""),
+    ("total_vacancy_rate",       "percent", ""),
+    ("available_sf",             "sf",      ""),
+    ("total_availability_rate",  "percent", ""),
+]
+
+
+def _cbre_emit(*, source: str, page: int, header: dict,
+               submarket: str, metric_type: str, unit: str,
+               lease_type: str, value: float | None,
+               raw_row: str, source_series: str,
+               confidence: float) -> dict:
+    """Build a single record dict in the shape pdf_parser.py uses."""
+    report_date = quarter_to_date(header["quarter"])
+    return {
+        "source": source, "source_page": page,
+        "report_date": report_date, "quarter": header["quarter"],
+        "metric_period": report_date, "period_type": "current",
+        "market": header["market"], "submarket": submarket,
+        "asset_class": header["asset_class"], "metric_type": metric_type,
+        "metric_value": value, "unit": unit, "lease_type": lease_type,
+        "confidence": confidence, "raw_text": raw_row[:200],
+        "parser_strategy": source_series,
+        "extraction_notes": f"{source_series} col: {metric_type}",
+    }
+
+
+def _parse_cbre_new_oc(pdf, pages: list[str], source: str,
+                       filepath: str) -> list[dict]:
+    header = _cbre_header(pages, filepath)
+    if not header["quarter"]:
+        _warn(f"{source}: CBRE new OC — could not detect quarter; skipping.")
+        return []
+    if not header["market"]:
+        header["market"] = "Orange County"
+    header["asset_class"] = header.get("asset_class") or "industrial"
+
+    records: list[dict] = []
+
+    # ---- Figure 6: page index 3, first table on the page ----
+    fig6_page_idx = 3
+    if fig6_page_idx < len(pdf.pages):
+        tables = pdf.pages[fig6_page_idx].find_tables()
+        if tables:
+            rows = tables[0].extract()
+            # Header row is rows[0]; data starts at rows[1].
+            for row in rows[1:]:
+                if not row or not row[0]:
+                    continue
+                name = str(row[0]).strip()
+                if not name or "total" in name.lower():
+                    continue
+                raw_row = " | ".join(str(c or "") for c in row)
+                # Skip if the row doesn't have all expected columns.
+                if len(row) < 1 + len(_CBRE_FIG6_COLS):
+                    continue
+                for i, (mt, unit, lt) in enumerate(_CBRE_FIG6_COLS, start=1):
+                    val = _grid_value(row[i]) if row[i] is not None else None
+                    if val is None:
+                        continue
+                    records.append(_cbre_emit(
+                        source=source, page=fig6_page_idx + 1,
+                        header=header, submarket=name,
+                        metric_type=mt, unit=unit, lease_type=lt,
+                        value=val, raw_row=raw_row,
+                        source_series="cbre_oc_market_statistics",
+                        confidence=0.95,
+                    ))
+
+    # ---- Figure 9: page index 6, first table on the page ----
+    fig9_page_idx = 6
+    if fig9_page_idx < len(pdf.pages):
+        tables = pdf.pages[fig9_page_idx].find_tables()
+        if tables:
+            rows = tables[0].extract()
+            for row in rows[1:]:
+                if not row or not row[0]:
+                    continue
+                name = str(row[0]).strip()
+                if not name:
+                    continue
+                # Section headers ("NORTH ORANGE COUNTY") have no values
+                # in the other columns; totals end with " TOTAL".
+                rest_empty = all(
+                    (c is None or str(c).strip() == "")
+                    for c in row[1:]
+                )
+                if rest_empty:
+                    continue
+                if "total" in name.lower():
+                    continue
+                raw_row = " | ".join(str(c or "") for c in row)
+                if len(row) < 1 + len(_CBRE_FIG9_COLS):
+                    continue
+                for i, (mt, unit, lt) in enumerate(_CBRE_FIG9_COLS, start=1):
+                    val = _grid_value(row[i]) if row[i] is not None else None
+                    if val is None:
+                        continue
+                    records.append(_cbre_emit(
+                        source=source, page=fig9_page_idx + 1,
+                        header=header, submarket=name,
+                        metric_type=mt, unit=unit, lease_type=lt,
+                        value=val, raw_row=raw_row,
+                        source_series="cbre_oc_market_area_detail",
+                        confidence=0.92,
+                    ))
+
+    if not records:
+        _warn(f"{source}: CBRE new OC — both Figure 6 and Figure 9 tables "
+              f"were empty on the expected pages.")
     return records
 
 
@@ -1821,6 +2000,8 @@ def parse_pdf(filepath: str) -> list[dict]:
             return _parse_voit(pdf, pages, source, filepath)
         if provider == "jll":
             return _parse_jll(pdf, pages, source, filepath)
+        if provider == "andover":
+            return _parse_andover(pdf, pages, source, filepath)
         return _parse_kidder(pdf, pages, source, filepath)
 
 
@@ -1913,3 +2094,114 @@ def _parse_kidder(pdf, pages: list[str], source: str,
 def get_warnings() -> list[str]:
     """Return warnings emitted by the most recent parse_pdf call."""
     return list(PARSER_WARNINGS)
+
+
+# ---------------------------------------------------------------------------
+# Andover / CORFAC Puget Sound parser (verified Q2 2025)
+#
+# Marketing summary PDF — market-level only, no geographic submarkets.
+# What's actionable is a per-building-class breakdown table at the bottom
+# of each of the two pages: page 0 industrial, page 1 office. Both look
+# like:
+#
+#     Industrial Market Statistics
+#     Current Quarter RBA Vacancy Rate Market Rent/SF Availability Rate
+#     Logistics 250,606,220 10.2% $1.10/SF 14.2%
+#     Specialized Industrial 85,666,992 4.8% $1.21/SF 4.8%
+#     Flex 29,469,613 9.7% $1.85/SF 11.3%
+#     Market 365,742,825 8.9% $1.19/SF 11.7%
+#
+# Two pdfplumber gotchas:
+#   1. Up/down arrows render as private-use glyphs (, ). Strip
+#      both before regex matching.
+#   2. Whitespace inside extracted text varies; collapse to single spaces
+#      per line before the regex.
+#
+# Building class is stored in the `submarket` column (no schema change);
+# the "Market" row IS the all-classes aggregate. asset_class is
+# 'industrial' on page 0 and 'office' on page 1. lease_type is left
+# empty — the report doesn't specify NNN vs gross.
+# ---------------------------------------------------------------------------
+
+_ANDOVER_ROW_RE = re.compile(
+    r"^(.+?)\s+([\d,]{6,})\s+([\d.]+)%\s+\$?([\d.]+)/SF\s+([\d.]+)%"
+)
+_ANDOVER_GLYPHS = ("", "")
+
+
+def _andover_clean_line(line: str) -> str:
+    """Strip private-use glyphs and collapse whitespace."""
+    for g in _ANDOVER_GLYPHS:
+        line = line.replace(g, "")
+    return re.sub(r"\s+", " ", line).strip()
+
+
+def _andover_quarter(pages: list[str]) -> str | None:
+    """First 'Q[1-4] YYYY' mention in the first page header."""
+    head = pages[0] if pages else ""
+    m = re.search(r"\bQ\s*([1-4])\s+(20\d{2})\b", head)
+    if m:
+        return f"{m.group(1)}Q {m.group(2)}"
+    return None
+
+
+def _parse_andover(pdf, pages: list[str], source: str,
+                   filepath: str) -> list[dict]:
+    quarter = _andover_quarter(pages)
+    if not quarter:
+        _warn(f"{source}: Andover — could not detect quarter from page-1 "
+              f"header; skipping.")
+        return []
+    report_date = quarter_to_date(quarter)
+
+    # The Andover report covers Puget Sound; we tag it as 'Seattle' to
+    # match the existing Kidder Seattle parser's market name so the data
+    # joins cleanly in Trends / Compare / Library views.
+    market = "Seattle"
+
+    page_asset = {0: "industrial", 1: "office"}  # page index -> asset_class
+    records: list[dict] = []
+
+    for pi, page in enumerate(pages):
+        asset_class = page_asset.get(pi)
+        if asset_class is None:
+            continue
+        for raw_line in page.split("\n"):
+            line = _andover_clean_line(raw_line)
+            m = _ANDOVER_ROW_RE.match(line)
+            if not m:
+                continue
+            building_class, rba_s, vac_s, rent_s, avail_s = m.groups()
+            try:
+                rba   = float(rba_s.replace(",", ""))
+                vac   = float(vac_s)
+                rent  = float(rent_s)
+                avail = float(avail_s)
+            except ValueError:
+                continue
+            common = {
+                "source": source, "source_page": pi + 1,
+                "report_date": report_date, "quarter": quarter,
+                "metric_period": report_date, "period_type": "current",
+                "market": market, "submarket": building_class,
+                "asset_class": asset_class, "lease_type": "",
+                "confidence": 0.95, "raw_text": line[:200],
+                "parser_strategy": "andover_market_statistics",
+            }
+            records.append({**common, "metric_type": "total_inventory",
+                            "metric_value": rba, "unit": "sf",
+                            "extraction_notes": "Andover RBA"})
+            records.append({**common, "metric_type": "total_vacancy_rate",
+                            "metric_value": vac, "unit": "percent",
+                            "extraction_notes": "Andover vacancy"})
+            records.append({**common, "metric_type": "asking_rent",
+                            "metric_value": rent, "unit": "dollar_per_sf",
+                            "extraction_notes": "Andover market rent"})
+            records.append({**common, "metric_type": "total_availability_rate",
+                            "metric_value": avail, "unit": "percent",
+                            "extraction_notes": "Andover availability"})
+
+    if not records:
+        _warn(f"{source}: Andover — no building-class rows matched the "
+              f"expected pattern on pages 0 or 1.")
+    return records
