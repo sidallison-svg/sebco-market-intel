@@ -1,13 +1,10 @@
 """
-Sebco Market Intel — v2 dashboard entry point.
+Sebco Market Intel — entry point.
 
 Run with:
     streamlit run app.py
-
-This is the new entry; the old dashboard.py stays in the tree (and
-runnable) until the final swap commit. main.py still launches the
-old app — flip that file last so the rebuild can be QA'd against the
-old one running side-by-side.
+    # or
+    python main.py
 
 How the navigation works:
   - `st.navigation` is called with position='hidden', which registers

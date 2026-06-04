@@ -1,6 +1,6 @@
 # Sebco Market Intel
 
-A local dashboard for extracting and tracking commercial real estate market data from Kidder Mathews quarterly PDF reports.
+A local dashboard for extracting and tracking commercial real estate market data from quarterly PDF reports (Kidder Mathews, CBRE, Voit Real Estate Services, JLL).
 
 ## Quick Start
 
@@ -24,17 +24,17 @@ pip install -r requirements.txt
 ### 3. Run the Dashboard
 
 ```
-streamlit run dashboard.py
+streamlit run app.py
 ```
 
 A browser window will open at http://localhost:8501 with the dashboard.
 
 ### 4. Upload PDFs
 
-1. Click **Upload** in the sidebar
-2. Drag and drop one or more Kidder Mathews quarterly market report PDFs
-3. Review the extracted data and click **Save to database**
-4. Use the other pages to view summaries, trends, and comparisons
+1. Click **Library** in the top tab bar
+2. Expand the **Upload a report** section and drop in a PDF
+3. Review the extracted preview and click **Save to database**
+4. Use Pulse / Compare / Trends to explore the data
 
 ## Sharing the Database via OneDrive
 
@@ -60,49 +60,31 @@ By default, data is stored locally in `market_data.db`. To share across computer
 
 ## Dashboard Pages
 
-- **Upload**: Import Kidder Mathews PDF reports. Shows extracted data preview and confidence scores before saving.
-- **Summary**: Latest metrics per market and submarket at a glance. Hover any metric's ? icon for its definition.
-- **Trends**: Line charts of any metric over time, filterable by market and submarket. Series with fewer than 4 data points show dots only (no connecting line). Gaps longer than 6 months are not connected. Each series shows its data point count in the legend.
-- **Comparison**: Side-by-side view of two submarkets. Expand "Metric definitions" for a glossary of all metrics.
-- **Raw Data**: Searchable table of all records with CSV export and manual value correction. This is the only page that shows raw confidence scores.
-
-## Smart Search
-
-A search bar at the top of every page lets you jump to relevant data quickly. Type keywords like:
-
-- **Market names**: "Boise", "Seattle", "Inland Empire"
-- **Metrics**: "vacancy", "rent", "absorption", "construction", "cap rate"
-- **Page names**: "trend", "compare", "raw", "export"
-- **Combinations**: "Boise vacancy", "Seattle rent trend", "compare submarkets"
-
-The search parses your keywords, selects the best page, and pre-fills the filters.
+- **Pulse** — Landing page. Six Sebco markets at a glance with vacancy, asking rent, QoQ deltas, and rent sparklines.
+- **Compare** — Side-by-side KPI comparison of any two markets or submarkets. Per-side PDF snapshot download.
+- **Trends** — Multi-quarter line chart for one market + one metric, with optional submarket breakdown and Sebco rent overlay.
+- **Library** — Every uploaded report, freshness badges, drill-in to view/edit records, upload new PDFs, rejected records.
+- **Settings** — Edit `sebco_portfolio.json` (markets, building counts, in-place rents, lease type).
 
 ## Supported Report Formats
 
-The parser handles two Kidder Mathews report styles:
+- **Kidder Mathews** — structured tables, dual industrial/warehouse breakdowns, submarket statistics grids, narrative + sidebar callouts.
+- **CBRE** — page-level "Market Statistics by Submarket" grids.
+- **Voit Real Estate Services** — page-3 submarket statistics with auto-detected layout variants.
+- **JLL** — page-2 submarket tables (W&D / Manufacturing / Overall) plus single-page "Fundamentals" box.
 
-- **Structured** (e.g., Boise, Inland Empire): Reports with MARKET BREAKDOWN tables. Extraction accuracy is very high.
-- **Narrative** (e.g., Seattle): Reports with data in prose text and sidebar callouts. Accuracy is good but some values may need manual correction via the Raw Data page.
+## Data Quality
 
-## Data Quality Indicators
+The Library page surfaces parser confidence per source and lists any records that failed validation (missing required fields). To correct an extraction error, drill into a source from Library, expand "Edit a record", and update the value by record ID.
 
-Values extracted with lower confidence are flagged across the dashboard:
+## Architecture
 
-- A small warning icon appears next to any value where parser confidence is below 85%.
-- Full confidence scores and parser strategy details are visible on the **Raw Data** page.
-- Use the Raw Data page to correct any parsing errors. All edits are tracked with your username and timestamp.
-
-## Metric Glossary
-
-Hover the ? icon on any metric card or filter dropdown for its definition. Key metrics include:
-
-- **Vacancy Rate**: Percentage of total inventory currently unoccupied and available for lease.
-- **Lease Rate**: Average asking rental rate per square foot (typically monthly NNN).
-- **Net Absorption**: Net change in occupied space. Positive = more occupied, negative = more vacated.
-- **Total Inventory**: Total rentable building area tracked in the market/submarket.
-- **Under Construction**: Square footage of new buildings being built but not yet delivered.
-- **Cap Rate**: Capitalization rate (net operating income / property value). Lower = higher prices.
-
-## Editing Data
-
-On the Raw Data page, enter a record ID and new value to correct any parsing errors. All edits are tracked with your username and timestamp.
+- `app.py` — Streamlit entry point + custom top tab bar
+- `app_pages/` — one Python file per page (pulse, compare, trends, library, settings)
+- `components/` — shared UI primitives (kpi_card, sparkline, freshness_badge)
+- `theme.py` — color palette + Inter typography + injected CSS + Plotly template
+- `db.py` — v2 normalized schema, upsert_metrics, all DB helpers
+- `pdf_parser.py` — provider detection + per-provider parsers (Kidder, CBRE, Voit, JLL)
+- `ingest/` — thin per-provider ingestion modules that wrap parsers + upsert
+- `pdf_export.py` — WeasyPrint one-page snapshot renderer (used by Compare)
+- `scripts/` — migration + diagnostic utilities

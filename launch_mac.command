@@ -1,3 +1,3 @@
 #!/bin/bash
 cd "$(dirname "$0")"
-streamlit run dashboard.py
+streamlit run app.py
