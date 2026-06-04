@@ -498,6 +498,11 @@ def upsert_metrics(records: list[dict],
                    source_file_id: int | None = None) -> dict:
     """Insert or update metric rows, keyed by the v2 UNIQUE constraint.
 
+    Accepts dicts using v2 field names (value, period_date, source_series,
+    ingested_at) OR the legacy v1 names from pdf_parser (metric_value,
+    metric_period, parser_strategy, date_ingested) — both are translated
+    in-place so parser output flows through unchanged.
+
     Re-ingesting the same source PDF updates rows in place rather than
     duplicating — this is the fix for the old upload-page bug where a
     save fired before the duplicate check.
@@ -519,7 +524,7 @@ def upsert_metrics(records: list[dict],
     rejected_ids: list[int] = []
     try:
         for raw in records:
-            r = _normalize(raw)
+            r = _normalize(_translate_v1(raw))
             missing = _validate(r)
             if missing:
                 cur = conn.execute(
@@ -614,20 +619,17 @@ def upsert_metrics(records: list[dict],
     }
 
 
-@_retry
 def insert_metrics(records: list[dict],
                    db_path: str | None = None,
                    source_file_id: int | None = None) -> dict:
-    """v1-compatible alias used by the Upload page. Translates v1 field
-    names (metric_value, metric_period, parser_strategy, date_ingested)
-    and delegates to upsert_metrics().
+    """v1-compatible facade used by the Upload page.
 
-    Returns the v1 shape ({inserted, rejected, rejected_ids}) so the
-    dashboard's existing handling continues to work; `updated` is folded
-    into `inserted` for the legacy caller.
+    Delegates to upsert_metrics (which handles the v1-name translation).
+    Returns the v1 result shape ({inserted, rejected, rejected_ids}) —
+    `updated` is folded into `inserted` so legacy callers don't have to
+    learn the new field.
     """
-    translated = [_translate_v1(r) for r in records]
-    res = upsert_metrics(translated, db_path=db_path,
+    res = upsert_metrics(records, db_path=db_path,
                          source_file_id=source_file_id)
     return {
         "inserted": res["inserted"] + res["updated"],
