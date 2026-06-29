@@ -24,7 +24,13 @@ import pandas as pd
 import streamlit as st
 
 from components import sparkline
+from config import get_db_path
 from db import get_all_metrics
+from pdf_export import (
+    PdfExportError,
+    market_overview_filename,
+    render_market_overview,
+)
 from theme import PALETTE, RADIUS, SHADOW, SPACE, TYPE_SCALE
 from utils import (
     MARKET_WIDE_SUBMARKETS,
@@ -385,10 +391,37 @@ def _add_market_dialog(market_subs: dict[str, list[str]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard PDF export (matches the printed Q1 dashboard layout)
+# ---------------------------------------------------------------------------
+
+def _dashboard_pdf_control() -> None:
+    """Generate the one-page Market Dashboard PDF on click, then offer it for
+    download. Generation is gated behind the button so a (slow) WeasyPrint
+    render doesn't run on every Pulse load."""
+    if st.button("⬇ Dashboard PDF", width="stretch", key="pulse_gen_pdf"):
+        try:
+            st.session_state["pulse_pdf"] = render_market_overview(get_db_path())
+            st.session_state.pop("pulse_pdf_err", None)
+        except PdfExportError as e:
+            st.session_state["pulse_pdf_err"] = str(e)
+            st.session_state.pop("pulse_pdf", None)
+    if st.session_state.get("pulse_pdf_err"):
+        st.error(f"PDF export failed: {st.session_state['pulse_pdf_err']}")
+    if st.session_state.get("pulse_pdf"):
+        st.download_button(
+            "Save PDF", data=st.session_state["pulse_pdf"],
+            file_name=market_overview_filename(), mime="application/pdf",
+            width="stretch", key="pulse_save_pdf",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Layout — responsive 3-up grid of Sebco markets, in canonical order
 # ---------------------------------------------------------------------------
 
-_, add_col = st.columns([4, 1])
+_, dl_col, add_col = st.columns([3, 1.3, 1])
+with dl_col:
+    _dashboard_pdf_control()
 with add_col:
     if st.button("➕ Add market", width="stretch", key="pulse_add_market"):
         _add_market_dialog(_market_submarkets())

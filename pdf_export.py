@@ -339,25 +339,39 @@ def _q_label(quarter: str | None) -> str:
     return f"Q{m.group(1)} {m.group(2)}" if m else str(quarter)
 
 
-def _ov_pick(conn, name: str, metric_type: str, period_type: str):
-    """Best DB row for a portfolio name + metric + period.
+def _ov_pick(conn, name, metric_types, period_type, portfolio):
+    """Best DB row for a Sebco portfolio market + metric + period.
 
-    Matches the name against either market or submarket; prefers
-    market-wide rows (submarket = '' in v2), then higher confidence,
-    then most recent.
+    Resolves `name` through the portfolio's data_source alias map (via
+    utils.data_query_keys) so submarket-backed markets — Kent Valley ->
+    Seattle/Southend, Marysville -> Seattle/Northend — find their data the
+    same way the Pulse page does. `metric_types` may be a single string or
+    an ordered list (first match wins, e.g. total_vacancy_rate then the
+    Kidder-style vacancy_rate). Submarket aliases are tried in priority
+    order; within a hit, higher confidence then most recent wins.
     """
-    return conn.execute(
-        """
-        SELECT value, unit, lease_type, quarter, period_date
-        FROM metrics
-        WHERE metric_type = ? AND period_type = ?
-          AND (LOWER(market) = LOWER(?) OR LOWER(submarket) = LOWER(?))
-        ORDER BY (submarket = '') DESC, confidence DESC,
-                 period_date DESC
-        LIMIT 1
-        """,
-        (metric_type, period_type, name, name),
-    ).fetchone()
+    from utils import data_query_keys
+
+    if isinstance(metric_types, str):
+        metric_types = [metric_types]
+    db_market, submarkets = data_query_keys(name, portfolio)
+    for mt in metric_types:
+        for sub in submarkets:
+            row = conn.execute(
+                """
+                SELECT value, unit, lease_type, quarter, period_date
+                FROM metrics
+                WHERE metric_type = ? AND period_type = ?
+                  AND LOWER(market) = LOWER(?) AND submarket = ?
+                  AND asset_class IN ('industrial', 'overall')
+                ORDER BY confidence DESC, period_date DESC
+                LIMIT 1
+                """,
+                (mt, period_type, db_market, sub),
+            ).fetchone()
+            if row is not None and row["value"] is not None:
+                return row
+    return None
 
 
 def _num(row):
@@ -369,8 +383,19 @@ def _num(row):
         return None
 
 
-def _missing():
-    return {"text": EM_DASH, "missing": True, "arrow": "", "color": ""}
+def _abbr_sf(v: float) -> str:
+    """Square-footage with M/k abbreviation: 2,580,000 -> '2.58M sf'."""
+    v = abs(v)
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:,.2f}M sf"
+    if v >= 1_000:
+        return f"{v / 1_000:,.0f}k sf"
+    return f"{v:,.0f} sf"
+
+
+def _missing() -> dict:
+    return {"value": EM_DASH, "meta": "", "arrow": "", "color": "",
+            "tint": False, "missing": True}
 
 
 def _vac_cell(cur, prev) -> dict:
@@ -378,16 +403,14 @@ def _vac_cell(cur, prev) -> dict:
     if v is None:
         return _missing()
     p = _num(prev)
-    if p is None:
-        arrow, color = _ARROW_FLAT, _GRAY  # no prior quarter to compare
-    elif abs(v - p) <= 0.1:
+    if p is None or abs(v - p) <= 0.1:
         arrow, color = _ARROW_FLAT, _GRAY
     elif v > p:
         arrow, color = _ARROW_UP, _RED     # vacancy up = bad
     else:
         arrow, color = _ARROW_DOWN, _GREEN
-    return {"text": f"{v:.1f}%", "arrow": arrow, "color": color,
-            "missing": False}
+    return {"value": f"{v:.1f}%", "meta": "", "arrow": arrow, "color": color,
+            "tint": True, "missing": False}
 
 
 def _rent_cell(cur, prev) -> dict:
@@ -401,9 +424,8 @@ def _rent_cell(cur, prev) -> dict:
         arrow, color = _ARROW_UP, _GREEN   # rent up = good
     else:
         arrow, color = _ARROW_DOWN, _RED
-    ll = _ov_lease_label(cur["lease_type"])
-    text = f"${v:,.2f}" + (f" {ll}" if ll else "")
-    return {"text": text, "arrow": arrow, "color": color, "missing": False}
+    return {"value": f"${v:,.2f}", "meta": _ov_lease_label(cur["lease_type"]),
+            "arrow": arrow, "color": color, "tint": True, "missing": False}
 
 
 def _sebco_cell(pf: dict) -> dict:
@@ -414,9 +436,8 @@ def _sebco_cell(pf: dict) -> dict:
         rv = float(r)
     except (TypeError, ValueError):
         return _missing()
-    ll = _ov_lease_label(pf.get("lease_type"))
-    return {"text": f"${rv:,.2f}" + (f" {ll}" if ll else ""),
-            "arrow": "", "color": "", "missing": False}
+    return {"value": f"${rv:,.2f}", "meta": _ov_lease_label(pf.get("lease_type")),
+            "arrow": "", "color": "", "tint": False, "missing": False}
 
 
 def _abs_cell(cur) -> dict:
@@ -430,23 +451,23 @@ def _abs_cell(cur) -> dict:
         arrow, color = _ARROW_UP, _GREEN
     else:
         arrow, color = _ARROW_DOWN, _RED
-    ql = _q_label(cur["quarter"])
-    text = f"{sign}{abs(v) / 1000:,.0f}k sf" + (f" · {ql}" if ql else "")
-    return {"text": text, "arrow": arrow, "color": color, "missing": False}
+    return {"value": f"{sign}{_abbr_sf(v)}", "meta": _q_label(cur["quarter"]),
+            "arrow": arrow, "color": color, "tint": True, "missing": False}
 
 
 def _pipe_cell(uc, planned) -> dict:
     ucv = _num(uc)
     pv = _num(planned)
     if ucv is not None and ucv >= 50_000:
-        text = f"{ucv:,.0f} sf U/C"
+        value, meta = _abbr_sf(ucv), "U/C"
     elif pv is not None and pv >= 50_000:
-        text = f"{pv:,.0f} sf Proposed"
+        value, meta = _abbr_sf(pv), "Proposed"
     elif ucv is not None or pv is not None:
-        text = "Limited"
+        value, meta = "Limited", ""
     else:
         return _missing()
-    return {"text": text, "arrow": "", "color": "", "missing": False}
+    return {"value": value, "meta": meta, "arrow": "", "color": "",
+            "tint": False, "missing": False}
 
 
 def _overview_quarter(conn) -> str:
@@ -465,6 +486,42 @@ def _overview_quarter(conn) -> str:
     return f"Q{(now.month - 1) // 3 + 1} {now.year}"
 
 
+_VACANCY_MTS = ["total_vacancy_rate", "vacancy_rate"]
+_ABSORPTION_MTS = ["net_absorption", "ytd_net_absorption"]
+
+
+def _key_actions(stats: list[dict]) -> list[str]:
+    """A few factual portfolio call-outs derived from the real numbers
+    (highest vacancy, tightest market, best Sebco rent position)."""
+    actions: list[str] = []
+    with_vac = [s for s in stats if s["vac"] is not None]
+    if with_vac:
+        hi = max(with_vac, key=lambda s: s["vac"])
+        lo = min(with_vac, key=lambda s: s["vac"])
+        actions.append(
+            f"Highest vacancy: {hi['name']} at {hi['vac']:.1f}% — watch "
+            f"leasing exposure."
+        )
+        if lo["name"] != hi["name"]:
+            actions.append(
+                f"Tightest market: {lo['name']} at {lo['vac']:.1f}%."
+            )
+    spreads = [
+        (s["name"], s["sebco"], s["market"])
+        for s in stats
+        if s["sebco"] is not None and s["market"] is not None
+    ]
+    if spreads:
+        name, sebco, market = min(spreads, key=lambda t: t[1] - t[2])
+        gap = sebco - market
+        rel = "below" if gap < 0 else "above"
+        actions.append(
+            f"Best rent position: {name}, Sebco ${sebco:.2f} vs market "
+            f"${market:.2f} ({abs(gap):.2f} {rel})."
+        )
+    return actions
+
+
 def _fetch_overview_data(db_path: str) -> dict:
     from utils import SEBCO_PORTFOLIO_ORDER, load_sebco_portfolio
 
@@ -481,6 +538,7 @@ def _fetch_overview_data(db_path: str) -> dict:
     try:
         quarter = _overview_quarter(conn)
         rows = []
+        stats = []  # raw numbers for the Key Portfolio Actions block
         for name in names:
             pf = portfolio.get(name, {})
             bits = []
@@ -490,35 +548,62 @@ def _fetch_overview_data(db_path: str) -> dict:
             tsf = pf.get("total_sf")
             if tsf:
                 bits.append(f"{tsf / 1000:,.0f}k sf")
+
+            vac_cur = _ov_pick(conn, name, _VACANCY_MTS, "current", portfolio)
+            rent_cur = _ov_pick(conn, name, "asking_rent", "current", portfolio)
             rows.append({
                 "name": name.upper(),
                 "sub_meta": ("(" + ", ".join(bits) + ")") if bits else "",
                 "vacancy": _vac_cell(
-                    _ov_pick(conn, name, "total_vacancy_rate", "current"),
-                    _ov_pick(conn, name, "total_vacancy_rate",
-                             "prior_quarter"),
+                    vac_cur,
+                    _ov_pick(conn, name, _VACANCY_MTS, "prior_quarter",
+                             portfolio),
                 ),
                 "market_rent": _rent_cell(
-                    _ov_pick(conn, name, "asking_rent", "current"),
-                    _ov_pick(conn, name, "asking_rent", "prior_quarter"),
+                    rent_cur,
+                    _ov_pick(conn, name, "asking_rent", "prior_quarter",
+                             portfolio),
                 ),
                 "sebco_rent": _sebco_cell(pf),
                 "absorption": _abs_cell(
-                    _ov_pick(conn, name, "net_absorption", "current")
+                    _ov_pick(conn, name, _ABSORPTION_MTS, "current", portfolio)
                 ),
                 "pipeline": _pipe_cell(
-                    _ov_pick(conn, name, "under_construction", "current"),
-                    _ov_pick(conn, name, "planned_construction", "current"),
+                    _ov_pick(conn, name, "under_construction", "current",
+                             portfolio),
+                    _ov_pick(conn, name, "planned_construction", "current",
+                             portfolio),
                 ),
+            })
+            stats.append({
+                "name": name.title(),
+                "vac": _num(vac_cur),
+                "market": _num(rent_cur),
+                "sebco": pf.get("sebco_asking_rent"),
             })
     finally:
         conn.close()
 
+    total_b = sum(portfolio.get(n, {}).get("building_count") or 0 for n in names)
+    total_sf = sum(portfolio.get(n, {}).get("total_sf") or 0 for n in names)
+    sub_bits = []
+    if total_b:
+        sub_bits.append(f"{total_b} buildings")
+    if total_sf:
+        sub_bits.append(f"{total_sf / 1000:,.0f}k sf")
+    subtitle = " · ".join(sub_bits)
+    if subtitle:
+        subtitle += f" across {len(names)} Sebco markets"
+    else:
+        subtitle = f"{len(names)} Sebco markets"
+
     return {
         "title": f"{quarter.upper()} INDUSTRIAL MARKET DASHBOARD",
+        "subtitle": subtitle,
         "footer_quarter": quarter,
         "current_month_year": datetime.now().strftime("%B %Y"),
         "rows": rows,
+        "key_actions": _key_actions(stats),
     }
 
 

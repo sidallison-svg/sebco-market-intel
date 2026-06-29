@@ -3,127 +3,114 @@
 <head>
 <meta charset="utf-8" />
 <style>
-  @page {
-    size: Letter landscape;
-    margin: 0.5in 0.55in;
-  }
-
+  @page { size: Letter landscape; margin: 0.5in 0.6in; }
   * { box-sizing: border-box; }
-
   body {
     margin: 0;
     font-family: "Helvetica", "Arial", sans-serif;
     color: #1A1A2E;
-    font-size: 10pt;
   }
 
-  /* Header band */
-  .ov-header {
-    background: #1a2b4a;
-    color: #FFFFFF;
-    padding: 14px 20px;
-    display: flex;
-    flex-direction: row;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .ov-header .title {
-    font-size: 18pt;
-    font-weight: bold;
-    letter-spacing: 0.02em;
-    color: #FFFFFF;
-  }
-  .ov-header .brand {
-    font-size: 12pt;
-    font-weight: bold;
-    letter-spacing: 0.18em;
-    color: #FFFFFF;
-    border: 1.5px solid rgba(255, 255, 255, 0.85);
-    padding: 5px 12px;
-    border-radius: 3px;
-  }
-
-  table.ov {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 16px;
-    font-size: 10pt;
-  }
-  table.ov thead th {
-    background: #1a2b4a;
-    color: #FFFFFF;
-    font-size: 9pt;
+  /* Title block */
+  .ov-title {
+    font-size: 25pt;
+    font-weight: 800;
+    color: #1F3A63;
+    letter-spacing: 0.01em;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    text-align: left;
-    padding: 9px 12px;
+    line-height: 1.04;
   }
-  table.ov thead th.num { text-align: right; }
+  .ov-subtitle {
+    font-size: 9pt;
+    color: #8A8F98;
+    margin-top: 5px;
+    margin-bottom: 14px;
+  }
+
+  /* Table */
+  table.ov { width: 100%; border-collapse: collapse; }
+  table.ov thead th {
+    font-size: 8pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8A8F98;
+    text-align: left;
+    padding: 7px 10px;
+    border-bottom: 1.5px solid #1F3A63;
+  }
+  table.ov thead th.market { width: 24%; }
   table.ov tbody td {
-    padding: 11px 12px;
-    border-bottom: 1px solid #E5E7EB;
+    padding: 11px 10px;
+    border-bottom: 1px solid #E8EAEE;
     vertical-align: top;
   }
-  table.ov tbody td.num {
-    text-align: right;
+  .mkt-name {
+    font-weight: 700;
+    color: #1A1A2E;
+    font-size: 11pt;
+    letter-spacing: 0.02em;
+  }
+  .mkt-meta { color: #9CA3AF; font-size: 7.5pt; margin-top: 2px; }
+
+  .cell-val {
+    font-size: 11pt;
+    font-weight: 600;
+    color: #1A1A2E;
     font-variant-numeric: tabular-nums;
   }
-  table.ov tbody tr:nth-child(even) { background: #F7F8FA; }
-  table.ov tbody tr:nth-child(odd) { background: #FFFFFF; }
+  .cell-val .arrow { font-size: 8pt; }
+  .cell-meta { font-size: 7.5pt; color: #9CA3AF; margin-top: 2px; }
+  td.missing .cell-val { color: #C8CBD0; font-weight: 400; }
 
-  .sub-name {
-    font-weight: bold;
-    color: #1a2b4a;
-    font-size: 10.5pt;
-  }
-  .sub-meta {
-    color: #8A8F98;
-    font-size: 7.5pt;
-    margin-top: 2px;
-  }
-  .missing {
-    color: #B0B0B0;
-    font-style: italic;
-  }
-  .arrow { font-weight: bold; }
-
-  .ov-footer {
+  /* Key Portfolio Actions band */
+  .ov-actions {
     margin-top: 18px;
-    border-top: 1px solid #E5E7EB;
-    padding-top: 8px;
-    font-size: 7.5pt;
-    color: #6B7280;
+    background: #1F3A63;
+    color: #FFFFFF;
+    padding: 11px 18px;
   }
+  .ov-actions .h {
+    font-size: 10pt;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  .ov-actions ul { margin: 7px 0 0 0; padding-left: 18px; }
+  .ov-actions li { font-size: 8.5pt; margin: 3px 0; color: #E8EDF5; }
+
+  .ov-src { font-size: 7pt; color: #9CA3AF; margin-top: 9px; }
 </style>
 </head>
 <body>
 
-  <div class="ov-header">
-    <span class="title">{{ title }}</span>
-    <span class="brand">SEBCO&nbsp;&nbsp;INC</span>
-  </div>
+  <div class="ov-title">{{ title }}</div>
+  {% if subtitle %}<div class="ov-subtitle">{{ subtitle }}</div>{% endif %}
 
   <table class="ov">
     <thead>
       <tr>
-        <th>Submarket</th>
-        <th class="num">Market Vacancy</th>
-        <th class="num">Market $/SF/MO</th>
-        <th class="num">Sebco $/SF/MO</th>
-        <th class="num">Absorption</th>
-        <th class="num">Pipeline</th>
+        <th class="market">Market</th>
+        <th>Vacancy</th>
+        <th>Market $/SF/MO</th>
+        <th>Your $/SF/MO</th>
+        <th>Absorption</th>
+        <th>Pipeline</th>
       </tr>
     </thead>
     <tbody>
       {% for r in rows %}
       <tr>
         <td>
-          <div class="sub-name">{{ r.name }}</div>
-          {% if r.sub_meta %}<div class="sub-meta">{{ r.sub_meta }}</div>{% endif %}
+          <div class="mkt-name">{{ r.name }}</div>
+          {% if r.sub_meta %}<div class="mkt-meta">{{ r.sub_meta }}</div>{% endif %}
         </td>
         {% for cell in [r.vacancy, r.market_rent, r.sebco_rent, r.absorption, r.pipeline] %}
-        <td class="num{% if cell.missing %} missing{% endif %}">
-          {{ cell.text }}{% if cell.arrow %} <span class="arrow" style="color: {{ cell.color }}">{{ cell.arrow }}</span>{% endif %}
+        <td class="{% if cell.missing %}missing{% endif %}">
+          <div class="cell-val"{% if cell.tint and cell.color %} style="color: {{ cell.color }}"{% endif %}>
+            {{ cell.value }}{% if cell.arrow %} <span class="arrow" style="color: {{ cell.color }}">{{ cell.arrow }}</span>{% endif %}
+          </div>
+          {% if cell.meta %}<div class="cell-meta">{{ cell.meta }}</div>{% endif %}
         </td>
         {% endfor %}
       </tr>
@@ -131,9 +118,18 @@
     </tbody>
   </table>
 
-  <div class="ov-footer">
-    Source: Kidder Mathews, Andover/Corfac, CBRE, Voit {{ footer_quarter }} Reports
-    &bull; Prepared {{ current_month_year }}
+  {% if key_actions %}
+  <div class="ov-actions">
+    <div class="h">Key Portfolio Actions</div>
+    <ul>
+      {% for a in key_actions %}<li>{{ a }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <div class="ov-src">
+    Source: Kidder Mathews, CBRE, Voit, JLL {{ footer_quarter }} reports
+    &bull; Prepared {{ current_month_year }} &bull; SEBCO INC
   </div>
 
 </body>
