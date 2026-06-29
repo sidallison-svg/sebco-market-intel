@@ -37,6 +37,7 @@ _PAGES = [
     st.Page("app_pages/pulse.py",    title="Pulse",    default=True),
     st.Page("app_pages/compare.py",  title="Compare"),
     st.Page("app_pages/trends.py",   title="Trends"),
+    st.Page("app_pages/ask.py",      title="Ask"),
     st.Page("app_pages/library.py",  title="Library"),
     st.Page("app_pages/settings.py", title="Settings"),
 ]
@@ -58,8 +59,8 @@ def _render_topnav() -> None:
     """
     st.markdown('<div class="topnav-brand">Sebco Market Intel</div>',
                 unsafe_allow_html=True)
-    nav_cols = st.columns([1, 1, 1, 1, 1, 6])
-    for col, page in zip(nav_cols[:5], _PAGES):
+    nav_cols = st.columns([1, 1, 1, 1, 1, 1, 5])
+    for col, page in zip(nav_cols[:6], _PAGES):
         with col:
             st.page_link(page, label=page.title)
     st.markdown('<hr class="topnav-rule" />', unsafe_allow_html=True)
