@@ -3,13 +3,21 @@
     "building_count": 12,
     "total_sf": 280000,
     "sebco_asking_rent": 0.99,
-    "lease_type": "NNN"
+    "lease_type": "NNN",
+    "data_source": {
+      "market": "Seattle",
+      "submarket_aliases": ["Kent Valley", "Kent", "Southend"]
+    }
   },
   "Marysville": {
     "building_count": 5,
     "total_sf": 93000,
     "sebco_asking_rent": 0.94,
-    "lease_type": "NNN"
+    "lease_type": "NNN",
+    "data_source": {
+      "market": "Seattle",
+      "submarket_aliases": ["Marysville", "Northend"]
+    }
   },
   "San Diego": {
     "building_count": 5,

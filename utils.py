@@ -66,6 +66,68 @@ def is_using_local_portfolio() -> bool:
     show which file is currently in effect."""
     return os.path.exists(_PORTFOLIO_LOCAL_FILE)
 
+
+# ---------------------------------------------------------------------------
+# Sebco market -> where its data actually lives
+# ---------------------------------------------------------------------------
+# Some Sebco "markets" (Kent Valley, Marysville, ...) are not top-level
+# markets in the metrics table — they are sub-areas reported *inside* a
+# parent market's PDF. Kidder's Puget Sound report, for example, rolls Kent
+# into the "Southend" submarket and Marysville into "Northend"; it has no
+# literal "Kent Valley"/"Marysville" row. A portfolio entry can therefore
+# carry an optional `data_source`:
+#
+#   "Kent Valley": {
+#       ...,
+#       "data_source": {
+#           "market": "Seattle",
+#           "submarket_aliases": ["Kent Valley", "Kent", "Southend"]
+#       }
+#   }
+#
+# `submarket_aliases` is tried in priority order, so a report that breaks out
+# a literal "Kent Valley" submarket wins over the broader "Southend" rollup.
+# A market with no `data_source` is assumed top-level: its data lives under
+# market==<name> with a market-wide submarket ("" or "Market Total").
+
+# Submarket values that represent a whole market (no sub-area breakdown).
+MARKET_WIDE_SUBMARKETS = ["", "Market Total"]
+
+
+def resolve_data_source(market: str, portfolio: dict | None = None) -> dict | None:
+    """Return a Sebco market's `data_source` mapping, or None if it is a
+    top-level market whose data is stored under its own name.
+
+    The returned dict always has string `market` and a non-empty
+    `submarket_aliases` list. A malformed/empty mapping resolves to None
+    (treated as top-level) so a bad config degrades to current behavior
+    rather than blanking the card.
+    """
+    if portfolio is None:
+        portfolio = load_sebco_portfolio()
+    ds = portfolio.get(market, {}).get("data_source")
+    if isinstance(ds, dict) and ds.get("market") and ds.get("submarket_aliases"):
+        return {
+            "market": str(ds["market"]),
+            "submarket_aliases": [str(s) for s in ds["submarket_aliases"]],
+        }
+    return None
+
+
+def data_query_keys(market: str, portfolio: dict | None = None) -> tuple[str, list[str]]:
+    """Resolve a Sebco market to the (db_market, submarkets) pair to filter
+    the metrics table on. For a top-level market this is the market itself
+    plus the market-wide submarkets; for a submarket-backed market it is the
+    parent market plus its ordered submarket aliases.
+
+    `submarkets` is in priority order — earlier entries should win when more
+    than one has data for the same metric.
+    """
+    ds = resolve_data_source(market, portfolio)
+    if ds is not None:
+        return ds["market"], ds["submarket_aliases"]
+    return market, list(MARKET_WIDE_SUBMARKETS)
+
 # Anchored on "-market-research-" so we can pick the asset class out of the
 # prefix and the market slug + year + quarter out of the suffix.
 _FILENAME_RE = re.compile(

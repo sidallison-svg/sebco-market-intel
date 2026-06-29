@@ -125,15 +125,22 @@ if st.button("Save changes", type="primary", key="settings_save"):
     else:
         out: dict[str, dict] = {}
         for r in cleaned.to_dict(orient="records"):
-            out[r["market"]] = {
+            fields = {
                 "building_count":    int(r["building_count"]) if pd.notna(r["building_count"]) else None,
                 "total_sf":          int(r["total_sf"]) if pd.notna(r["total_sf"]) else None,
                 "sebco_asking_rent": float(r["sebco_asking_rent"]) if pd.notna(r["sebco_asking_rent"]) else None,
                 "lease_type":        r["lease_type"] or "NNN",
             }
             # Drop keys whose value is None so the JSON stays tidy.
-            out[r["market"]] = {k: v for k, v in out[r["market"]].items()
-                                if v is not None}
+            fields = {k: v for k, v in fields.items() if v is not None}
+            # Preserve config the editor doesn't expose (e.g. `data_source`,
+            # the submarket->market mapping) so saving from this page never
+            # silently drops it for an existing market.
+            preserved = {k: v for k, v in raw.get(r["market"], {}).items()
+                         if k not in fields and k not in (
+                             "building_count", "total_sf",
+                             "sebco_asking_rent", "lease_type")}
+            out[r["market"]] = {**fields, **preserved}
 
         save_sebco_portfolio(out)
         st.success(f"Saved {len(out)} markets to sebco_portfolio.json.")

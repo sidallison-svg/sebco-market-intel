@@ -24,7 +24,7 @@ import streamlit as st
 from components import sparkline
 from db import get_all_metrics
 from theme import PALETTE, RADIUS, SHADOW, SPACE, TYPE_SCALE
-from utils import SEBCO_PORTFOLIO_ORDER, load_sebco_portfolio
+from utils import SEBCO_PORTFOLIO_ORDER, data_query_keys, load_sebco_portfolio
 
 
 # ---------------------------------------------------------------------------
@@ -55,34 +55,45 @@ df = _frame()
 portfolio = load_sebco_portfolio()
 
 
+def _market_frame(market: str) -> pd.DataFrame:
+    """Rows in the metrics frame that represent this Sebco market.
+
+    Resolves the market through the portfolio's data_source map: a
+    top-level market (San Diego, Orange County) returns its market-wide
+    rows; a submarket-backed market (Kent Valley -> Seattle/Southend,
+    Marysville -> Seattle/Northend) returns the parent market's rows for
+    the aliased submarket(s). A `_subpri` column carries the alias
+    priority (0 = best) so the preferred alias wins when several match.
+    """
+    db_market, submarkets = data_query_keys(market, portfolio)
+    sub = df[
+        (df["market"] == db_market)
+        & (df["asset_class"].isin(["overall", "industrial"]))
+        & (df["submarket"].isin(submarkets))
+    ].copy()
+    if sub.empty:
+        return sub
+    priority = {name: i for i, name in enumerate(submarkets)}
+    sub["_subpri"] = sub["submarket"].map(priority).fillna(len(submarkets))
+    return sub
+
+
 def _best_value(market: str, mts: list[str],
                 period_type: str = "current") -> tuple[float | None, str]:
-    """Highest-confidence, most-recent value for any of the candidate
-    metric_types for this market (industrial, market-wide submarket).
+    """Highest-priority, highest-confidence, most-recent value for any of
+    the candidate metric_types for this market.
 
     Returns (value, unit) or (None, '')."""
-    if df.empty:
-        return None, ""
-    sub = df[
-        (df["market"] == market)
-        & (df["asset_class"] == "industrial")
-        & (df["submarket"] == "")
-        & (df["period_type"] == period_type)
-    ]
+    sub = _market_frame(market)
     if sub.empty:
-        # JLL stores LA/Seattle/etc. as asset_class='overall' for Format B
-        sub = df[
-            (df["market"] == market)
-            & (df["asset_class"].isin(["overall", "industrial"]))
-            & (df["submarket"].isin(["", "Market Total"]))
-            & (df["period_type"] == period_type)
-        ]
+        return None, ""
+    sub = sub[sub["period_type"] == period_type]
     for mt in mts:
         match = sub[sub["metric_type"] == mt]
         if match.empty:
             continue
-        match = match.sort_values(["confidence", "period_date"],
-                                  ascending=[False, False])
+        match = match.sort_values(["_subpri", "confidence", "period_date"],
+                                  ascending=[True, False, False])
         row = match.iloc[0]
         return (float(row["value"]) if pd.notna(row["value"]) else None,
                 row["unit"])
@@ -91,18 +102,20 @@ def _best_value(market: str, mts: list[str],
 
 def _historical(market: str, mts: list[str]) -> list[float | None]:
     """Up to four historical points (prior_year, prior_quarter, current)
-    for the sparkline. Returns chronological list of values."""
-    if df.empty:
-        return []
-    sub = df[
-        (df["market"] == market)
-        & (df["asset_class"].isin(["overall", "industrial"]))
-        & (df["submarket"].isin(["", "Market Total"]))
-        & (df["metric_type"].isin(mts))
-    ]
+    for the sparkline. Returns chronological list of values.
+
+    When several submarket aliases match, only the highest-priority one
+    that actually carries the metric is plotted, so the sparkline tracks a
+    single consistent series rather than mixing sub-areas.
+    """
+    sub = _market_frame(market)
     if sub.empty:
         return []
-    sub = sub.sort_values("period_date")
+    sub = sub[sub["metric_type"].isin(mts)]
+    if sub.empty:
+        return []
+    best_pri = sub["_subpri"].min()
+    sub = sub[sub["_subpri"] == best_pri].sort_values("period_date")
     return [float(v) if pd.notna(v) else None for v in sub["value"]]
 
 
@@ -248,16 +261,14 @@ def _render_card(market: str, col) -> None:
     rent_prev, _ = _best_value(market, ["asking_rent"],
                                period_type="prior_quarter")
 
-    # Quarter label for the chip
-    if not df.empty:
-        market_rows = df[(df["market"] == market)
-                         & (df["period_type"] == "current")]
-        quarter_label = (market_rows.sort_values("period_date",
-                                                 ascending=False)
-                         ["quarter"].iloc[0]
-                         if not market_rows.empty else "")
-    else:
-        quarter_label = ""
+    # Quarter label for the chip — resolved through the same data_source
+    # map so a submarket-backed market (Kent Valley, Marysville) still shows
+    # its parent report's quarter.
+    market_rows = _market_frame(market)
+    market_rows = market_rows[market_rows["period_type"] == "current"]
+    quarter_label = (market_rows.sort_values("period_date", ascending=False)
+                     ["quarter"].iloc[0]
+                     if not market_rows.empty else "")
 
     has_data = vac_curr is not None or rent_curr is not None
 
