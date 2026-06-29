@@ -51,5 +51,9 @@ def sparkline(values: list[float | None],
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
+    # staticPlot disables all interactivity (drag/pan/zoom/hover) so the
+    # sparkline renders as a plain, non-movable line instead of a draggable
+    # chart.
     st.plotly_chart(fig, width="stretch",
-                    config={"displayModeBar": False}, key=key)
+                    config={"displayModeBar": False, "staticPlot": True},
+                    key=key)
