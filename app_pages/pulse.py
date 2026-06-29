@@ -1,17 +1,19 @@
 """
-Pulse — landing page. At-a-glance state of all six Sebco markets.
+Pulse — landing page. At-a-glance state of the Sebco markets.
 
-3-column × 2-row grid of cards. Each card shows the two metrics
-principals look at most (vacancy + asking rent), a QoQ arrow if the
-source PDF carried a prior_quarter row, a tiny sparkline of rent over
-the historical points the DB has (current + prior_quarter + prior_year
-from Kidder breakdowns; sparser for CBRE/Voit/JLL which are single-
-period), and a link into the Trends page for that market.
+Responsive 3-up grid of cards (any number of markets, wrapping to new
+rows of three). Each card shows the two metrics principals look at most
+(vacancy + asking rent), a QoQ arrow if the source PDF carried a
+prior_quarter row, a tiny sparkline of rent over the historical points
+the DB has (current + prior_quarter + prior_year from Kidder breakdowns;
+sparser for CBRE/Voit/JLL which are single-period), and a link into the
+Trends page for that market.
 
 Markets without any uploaded data render a placeholder card with a
-direct nudge to the Library. The 6 Sebco markets are pinned in
-utils.SEBCO_PORTFOLIO_ORDER so the grid layout stays stable even when
-some are empty.
+direct nudge to the Library. Markets render in utils.ordered_markets()
+order: the canonical SEBCO_PORTFOLIO_ORDER first, then any added later.
+An "Add market" button opens a dialog to append a new market (with an
+optional data_source mapping) to the local portfolio file.
 """
 
 from __future__ import annotations
@@ -24,7 +26,13 @@ import streamlit as st
 from components import sparkline
 from db import get_all_metrics
 from theme import PALETTE, RADIUS, SHADOW, SPACE, TYPE_SCALE
-from utils import SEBCO_PORTFOLIO_ORDER, data_query_keys, load_sebco_portfolio
+from utils import (
+    MARKET_WIDE_SUBMARKETS,
+    data_query_keys,
+    load_sebco_portfolio,
+    ordered_markets,
+    save_sebco_portfolio,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -297,18 +305,101 @@ def _render_card(market: str, col) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Layout — 3 columns × 2 rows of Sebco markets, in canonical order
+# Add a market
 # ---------------------------------------------------------------------------
+
+def _market_submarkets() -> dict[str, list[str]]:
+    """Map each uploaded market to its real submarket names (excluding the
+    market-wide '' / 'Market Total' rows), for the Add-market data picker."""
+    if df.empty:
+        return {}
+    out: dict[str, list[str]] = {}
+    for m in sorted(df["market"].dropna().unique()):
+        subs = sorted(
+            s for s in df[df["market"] == m]["submarket"].dropna().unique()
+            if s and s != "Market Total"
+        )
+        out[m] = subs
+    return out
+
+
+@st.dialog("Add a market")
+def _add_market_dialog(market_subs: dict[str, list[str]]) -> None:
+    st.caption(
+        "Add a market card to Pulse. Saves to your local portfolio file "
+        "(`sebco_portfolio.local.json`)."
+    )
+    name = st.text_input("Market name", placeholder="e.g. Tacoma")
+
+    st.markdown("**Where does this market's data come from?**")
+    none_opt = "— none (no data yet) —"
+    parent_opts = [none_opt] + sorted(market_subs.keys())
+    parent = st.selectbox(
+        "Pull data from report / market", parent_opts,
+        help="The uploaded market this card reads its numbers from. Choose "
+             "'none' to add a placeholder with no data yet.",
+    )
+    subs: list[str] = []
+    if parent != none_opt:
+        subs = st.multiselect(
+            "Specific submarket(s)", market_subs.get(parent, []),
+            help="Leave empty to use the whole market. Pick one or more "
+                 "submarkets (e.g. Southend) if this market is a sub-area "
+                 "inside the report — the first match wins.",
+        )
+
+    with st.expander("Sebco position (optional)"):
+        c1, c2 = st.columns(2)
+        buildings = c1.number_input("Buildings", min_value=0, step=1, value=0)
+        total_sf = c2.number_input("Total SF", min_value=0, step=1000, value=0)
+        rent = c1.number_input("In-place asking rent ($/SF)", min_value=0.0,
+                               step=0.01, value=0.0, format="%.2f")
+        lease = c2.selectbox("Lease type",
+                             ["NNN", "industrial_gross", "modified_gross"])
+
+    if st.button("Add market", type="primary", width="stretch"):
+        clean = name.strip()
+        current = load_sebco_portfolio()
+        if not clean:
+            st.error("Market name is required.")
+        elif clean in current:
+            st.error(f"'{clean}' already exists.")
+        else:
+            entry: dict = {}
+            if buildings:
+                entry["building_count"] = int(buildings)
+            if total_sf:
+                entry["total_sf"] = int(total_sf)
+            if rent:
+                entry["sebco_asking_rent"] = float(rent)
+            entry["lease_type"] = lease
+            if parent != none_opt:
+                entry["data_source"] = {
+                    "market": parent,
+                    "submarket_aliases": subs or list(MARKET_WIDE_SUBMARKETS),
+                }
+            current[clean] = entry
+            save_sebco_portfolio(current)
+            st.success(f"Added {clean}.")
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Layout — responsive 3-up grid of Sebco markets, in canonical order
+# ---------------------------------------------------------------------------
+
+_, add_col = st.columns([4, 1])
+with add_col:
+    if st.button("➕ Add market", width="stretch", key="pulse_add_market"):
+        _add_market_dialog(_market_submarkets())
 
 if df.empty:
     st.warning("Database is empty. Visit Library to upload your first report.")
     st.stop()
 
-# Pair up six markets into two rows of three.
-for row_start in (0, 3):
+markets = ordered_markets(portfolio)
+for start in range(0, len(markets), 3):
     cols = st.columns(3, gap="medium")
-    for i, col in enumerate(cols):
-        if row_start + i >= len(SEBCO_PORTFOLIO_ORDER):
-            continue
-        _render_card(SEBCO_PORTFOLIO_ORDER[row_start + i], col)
+    for col, market in zip(cols, markets[start:start + 3]):
+        _render_card(market, col)
     st.markdown("")  # gap between rows

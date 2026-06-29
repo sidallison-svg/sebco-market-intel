@@ -17,6 +17,16 @@ SEBCO_PORTFOLIO_ORDER = [
 ]
 
 
+def ordered_markets(portfolio: dict) -> list[str]:
+    """Portfolio market names in canonical display order: the pinned
+    SEBCO_PORTFOLIO_ORDER entries that exist in the portfolio, followed by
+    any other markets (e.g. ones added later via the Pulse 'Add market'
+    button) in insertion order."""
+    pinned = [m for m in SEBCO_PORTFOLIO_ORDER if m in portfolio]
+    extra = [m for m in portfolio if m not in SEBCO_PORTFOLIO_ORDER]
+    return pinned + extra
+
+
 def _read_json(path: str) -> dict:
     """Load a JSON file and return a dict (or {} on any failure)."""
     try:
